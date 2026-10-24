@@ -1,15 +1,15 @@
 
 import { useRef, useState } from "react";
 import "./App.css";
-
 function App() {
+  const [loading, setLoading] = useState(false);
+  const [ticket, setTicket] = useState(null);
   const [language, setLanguage] = useState("te");
   const [phone, setPhone] = useState("");
   const [recording, setRecording] = useState(false);
   const [audioUrl, setAudioUrl] = useState("");
   const [photo, setPhoto] = useState(null);
   const [message, setMessage] = useState("");
-
   const recorderRef = useRef(null);
   const streamRef = useRef(null);
   const chunksRef = useRef([]);
@@ -59,8 +59,14 @@ function App() {
     }
   }
 
-  function handleSubmit(event) {
+
+
+  async function handleSubmit(event) {
     event.preventDefault();
+
+    if (loading) {
+      return;
+    }
 
     if (!/^[0-9]{10}$/.test(phone)) {
       setMessage("Please enter a valid 10-digit phone number.");
@@ -72,9 +78,60 @@ function App() {
       return;
     }
 
-    setMessage(
-      "Form validated! Complaint submission and ticket creation will be connected to the backend next."
-    );
+    setLoading(true);
+    setMessage("");
+    setTicket(null);
+
+    try {
+      const response = await fetch(
+        "http://127.0.0.1:8000/api/complaints/",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            customer_phone: phone,
+            language: language,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error || "Could not submit your complaint."
+        );
+      }
+
+      setTicket(data);
+      setMessage("Your complaint has been submitted successfully!");
+
+      // Clear the form fields after successful submission.
+      setPhone("");
+      setLanguage("te");
+      setPhoto(null);
+
+      // Release the old audio preview and clear it.
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+      }
+      setAudioUrl("");
+
+      // Reset the file input visually.
+      const photoInput = document.getElementById("photo");
+      if (photoInput) {
+        photoInput.value = "";
+      }
+    } catch (error) {
+      setMessage(
+        error.message ||
+        "Unable to connect to the server. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -208,14 +265,28 @@ function App() {
             {photo && <span className="field-help">Selected: {photo.name}</span>}
           </div>
 
-          {message && (
+
+          {message && !ticket && (
             <div className="message" role="status">
               {message}
             </div>
           )}
 
-          <button className="button button-submit" type="submit">
-            Continue to submit →
+          {ticket && (
+            <div className="message" role="status">
+              <h3>Complaint registered!</h3>
+              <p>Ticket number: {ticket.ticket_number}</p>
+              <p>Status: {ticket.status}</p>
+            </div>
+          )}
+
+
+          <button
+            className="button button-submit"
+            type="submit"
+            disabled={loading}
+          >
+            {loading ? "Submitting..." : "Submit complaint →"}
           </button>
 
           <p className="privacy-note">
