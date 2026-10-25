@@ -1,9 +1,9 @@
-import json
+
 import re
-from django.shortcuts import render
+
 from django.http import JsonResponse
-from django.views.decorators.http import require_POST
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_POST
 
 from .models import Complaint
 
@@ -11,16 +11,11 @@ from .models import Complaint
 @csrf_exempt
 @require_POST
 def create_complaint(request):
-    try:
-        data = json.loads(request.body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return JsonResponse(
-            {"error": "Request body must contain valid JSON."},
-            status=400,
-        )
+    phone = request.POST.get("customer_phone", "").strip()
+    language = request.POST.get("language", "te").strip()
 
-    phone = str(data.get("customer_phone", "")).strip()
-    language = str(data.get("language", "te")).strip()
+    audio = request.FILES.get("audio")
+    photo = request.FILES.get("photo")
 
     if not re.fullmatch(r"\d{10}", phone):
         return JsonResponse(
@@ -34,10 +29,37 @@ def create_complaint(request):
             status=400,
         )
 
-    complaint = Complaint.objects.create(
+    if not audio:
+        return JsonResponse(
+            {"error": "Please upload your voice recording."},
+            status=400,
+        )
+
+    if not audio.content_type or not audio.content_type.startswith("audio/"):
+        return JsonResponse(
+            {"error": "Please upload a valid audio file."},
+            status=400,
+        )
+
+    if photo and (
+        not photo.content_type
+        or not photo.content_type.startswith("image/")
+    ):
+        return JsonResponse(
+            {"error": "Please upload a valid image."},
+            status=400,
+        )
+
+    complaint = Complaint(
         customer_phone=phone,
         language=language,
+        audio=audio,
     )
+
+    if photo:
+        complaint.photo = photo
+
+    complaint.save()
 
     return JsonResponse(
         {
@@ -47,4 +69,3 @@ def create_complaint(request):
         },
         status=201,
     )
-

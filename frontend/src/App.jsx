@@ -83,19 +83,33 @@ function App() {
     setTicket(null);
 
     try {
+
+      const audioBlob = await fetch(audioUrl).then((response) =>
+        response.blob()
+      );
+
+      const formData = new FormData();
+
+      formData.append("customer_phone", phone);
+      formData.append("language", language);
+      formData.append(
+        "audio",
+        audioBlob,
+        `complaint.${audioBlob.type.includes("webm") ? "webm" : "audio"}`
+      );
+
+      if (photo) {
+        formData.append("photo", photo);
+      }
+
       const response = await fetch(
         "http://127.0.0.1:8000/api/complaints/",
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            customer_phone: phone,
-            language: language,
-          }),
+          body: formData,
         }
       );
+
 
       const data = await response.json();
 

@@ -9,3 +9,6 @@ __pycache__/
 .env.*
 !.env.example
 backend/db.sqlite3
+backend/complaints/audio/
+backend/complaints/photos/
+backend/media/
