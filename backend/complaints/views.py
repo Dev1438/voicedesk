@@ -184,12 +184,6 @@ def create_complaint(request):
             status=201,
         )
 
-    suggestions = suggest_complaint_details(complaint.original_transcript)
-    complaint.category = suggestions.category
-    complaint.priority = suggestions.priority
-    complaint.summary = suggestions.summary
-    complaint.classification_status = Complaint.ClassificationStatus.SUGGESTED
-
     try:
         complaint.english_translation = translate_to_english(
             complaint.original_transcript,
@@ -225,6 +219,16 @@ def create_complaint(request):
             complaint.pk,
             type(error).__name__,
         )
+
+    suggestion_text = (
+        complaint.english_translation.strip()
+        or complaint.original_transcript
+    )
+    suggestions = suggest_complaint_details(suggestion_text)
+    complaint.category = suggestions.category
+    complaint.priority = suggestions.priority
+    complaint.summary = suggestions.summary
+    complaint.classification_status = Complaint.ClassificationStatus.SUGGESTED
 
     if denoising_error:
         message = (

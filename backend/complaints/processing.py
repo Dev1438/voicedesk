@@ -29,10 +29,14 @@ _CATEGORY_KEYWORDS = {
     "technical": {
         "app",
         "application",
+        "battery",
+        "broken",
         "bug",
         "crash",
+        "device",
         "error",
         "internet",
+        "phone",
         "website",
     },
     "delivery": {
@@ -71,13 +75,22 @@ _CATEGORY_CONFIDENCE_TERMS = {
         "refund",
     },
     "account": {"account", "login", "password"},
-    "technical": {"crash", "bug", "error"},
+    "technical": {
+        "battery",
+        "broken",
+        "crash",
+        "bug",
+        "device",
+        "error",
+        "phone",
+    },
     "delivery": {"delivery", "deliver", "shipment", "parcel", "courier"},
     "service": {"customer care"},
 }
 
 
 def suggest_complaint_details(transcript):
+    transcript = transcript if isinstance(transcript, str) else ""
     clean_transcript = re.sub(r"\s+", " ", transcript).strip()
     normalized = clean_transcript.lower()
     words = set(re.findall(r"[a-z]+", normalized))

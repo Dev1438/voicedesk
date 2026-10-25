@@ -990,6 +990,30 @@ class ComplaintProcessingTests(TestCase):
             "te",
         )
 
+    @patch("complaints.views.transcribe_complaint")
+    @patch("complaints.views.translate_to_english")
+    def test_english_translation_drives_device_suggestions(
+        self,
+        translate,
+        transcribe,
+    ):
+        hindi_transcript = "मेरा फोन ठीक से काम नहीं कर रहा है।"
+        english_translation = (
+            "My phone is not working properly, its battery is dead"
+        )
+        transcribe.return_value = hindi_transcript
+        translate.return_value = english_translation
+
+        response = self._submit_complaint()
+
+        self.assertEqual(response.status_code, 201)
+        complaint = Complaint.objects.get()
+        self.assertEqual(complaint.original_transcript, hindi_transcript)
+        self.assertEqual(complaint.english_translation, english_translation)
+        self.assertEqual(complaint.category, "technical")
+        self.assertEqual(complaint.priority, "normal")
+        self.assertEqual(complaint.summary, english_translation)
+
     @patch("complaints.views.suggest_complaint_details")
     @patch("complaints.views.transcribe_complaint")
     def test_missing_translation_provider_preserves_transcript_and_suggestions(
@@ -1014,6 +1038,7 @@ class ComplaintProcessingTests(TestCase):
         )
         self.assertEqual(complaint.english_translation, "")
         self.assertEqual(complaint.category, "account")
+        suggest.assert_called_once_with("I need help with my account.")
         self.assertEqual(
             complaint.processing_status,
             Complaint.ProcessingStatus.TRANSLATION_UNAVAILABLE,
@@ -1065,6 +1090,14 @@ class ComplaintProcessingTests(TestCase):
         self.assertEqual(suggestions.priority, "high")
         self.assertTrue(suggestions.summary.endswith("."))
 
+    def test_urgent_device_complaint_gets_high_priority_suggestion(self):
+        suggestions = suggest_complaint_details(
+            "Emergency: my phone battery is dead and needs help immediately."
+        )
+
+        self.assertEqual(suggestions.category, "technical")
+        self.assertEqual(suggestions.priority, "high")
+
     def test_classifier_uses_fallbacks_when_confidence_is_low(self):
         suggestions = suggest_complaint_details(
             "Please look into this when you can."
@@ -1076,6 +1109,15 @@ class ComplaintProcessingTests(TestCase):
             suggestions.summary,
             "Please look into this when you can.",
         )
+
+    def test_classifier_handles_empty_or_missing_transcript_safely(self):
+        for transcript in ("", "   ", None):
+            with self.subTest(transcript=transcript):
+                suggestions = suggest_complaint_details(transcript)
+
+                self.assertEqual(suggestions.category, "Uncategorized")
+                self.assertEqual(suggestions.priority, "normal")
+                self.assertEqual(suggestions.summary, "Summary unavailable.")
 
 
 class DuplicateDetectionTests(TestCase):
