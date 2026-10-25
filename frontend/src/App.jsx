@@ -475,13 +475,25 @@ function App() {
                 <p>
                   <strong>Language:</strong> {queueTicket.language}
                   {" · "}
-                  <strong>Category:</strong>{" "}
-                  {queueTicket.category || "Uncategorized"}
-                  {" · "}
-                  <strong>Priority:</strong> {queueTicket.priority}
+                  <strong>Processing:</strong>{" "}
+                  {queueTicket.processing_status.replaceAll("_", " ")}
                 </p>
+                {queueTicket.classification_status === "suggested" && (
+                  <p>
+                    <strong>Automated suggestions (unreviewed)</strong>
+                    {" · "}
+                    <strong>Category:</strong>{" "}
+                    {queueTicket.category || "Uncategorized"}
+                    {" · "}
+                    <strong>Priority:</strong> {queueTicket.priority}
+                  </p>
+                )}
                 <p>
-                  <strong>Summary:</strong>{" "}
+                  <strong>
+                    {queueTicket.classification_status === "suggested"
+                      ? "Suggested summary:"
+                      : "Summary:"}
+                  </strong>{" "}
                   {queueTicket.summary || "No summary available."}
                 </p>
                 <p>
@@ -669,6 +681,11 @@ function App() {
               <h3>Complaint registered!</h3>
               <p>Ticket number: {ticket.ticket_number}</p>
               <p>Status: {ticket.status}</p>
+              {ticket.processing_status && (
+                <p>
+                  Processing: {ticket.processing_status.replaceAll("_", " ")}
+                </p>
+              )}
               {typeof ticket.original_transcript === "string" &&
                 ticket.original_transcript.trim() && (
                   <p>
@@ -676,6 +693,23 @@ function App() {
                     {ticket.original_transcript}
                   </p>
                 )}
+              {ticket.classification_status === "suggested" && (
+                <>
+                  <p><strong>Automated suggestions (unreviewed)</strong></p>
+                  <p>Category: {ticket.category}</p>
+                  <p>Priority: {ticket.priority}</p>
+                  <p>Summary: {ticket.summary}</p>
+                </>
+              )}
+              {ticket.processing_status === "translation_unavailable" && (
+                <p>English translation is unavailable until a provider is configured.</p>
+              )}
+              {ticket.english_translation && (
+                <p>
+                  <strong>English translation:</strong>{" "}
+                  {ticket.english_translation}
+                </p>
+              )}
             </div>
           )}
 

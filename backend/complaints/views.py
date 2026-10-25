@@ -1,4 +1,5 @@
 
+import logging
 import re
 
 from django.http import JsonResponse
@@ -9,7 +10,16 @@ from django.views.decorators.http import require_http_methods
 from django.views.decorators.http import require_POST
 
 from .models import Complaint
+from .processing import suggest_complaint_details
+from .translation import (
+    TranslationError,
+    TranslationUnavailable,
+    translate_to_english,
+)
 from .transcription import TranscriptionError, transcribe_complaint
+
+
+logger = logging.getLogger(__name__)
 
 
 def _complaint_payload(complaint):
@@ -22,6 +32,8 @@ def _complaint_payload(complaint):
         "category": complaint.category,
         "priority": complaint.priority,
         "summary": complaint.summary,
+        "processing_status": complaint.processing_status,
+        "classification_status": complaint.classification_status,
         "created_at": complaint.created_at.isoformat(),
         "updated_at": complaint.updated_at.isoformat(),
     }
@@ -105,26 +117,91 @@ def create_complaint(request):
 
     try:
         complaint.original_transcript = transcribe_complaint(complaint)
-        complaint.save(update_fields=["original_transcript", "updated_at"])
     except TranscriptionError as error:
+        complaint.processing_status = (
+            Complaint.ProcessingStatus.TRANSCRIPTION_FAILED
+        )
+        complaint.save(update_fields=["processing_status", "updated_at"])
         return JsonResponse(
             {
                 "message": "Complaint saved, but transcription failed.",
                 "ticket_number": str(complaint.ticket_number),
                 "status": complaint.status,
                 "transcription_status": "failed",
+                "processing_status": complaint.processing_status,
                 "transcription_error": str(error),
             },
             status=201,
         )
 
+    suggestions = suggest_complaint_details(complaint.original_transcript)
+    complaint.category = suggestions.category
+    complaint.priority = suggestions.priority
+    complaint.summary = suggestions.summary
+    complaint.classification_status = Complaint.ClassificationStatus.SUGGESTED
+
+    try:
+        complaint.english_translation = translate_to_english(
+            complaint.original_transcript,
+            complaint.language,
+        )
+        complaint.processing_status = Complaint.ProcessingStatus.COMPLETED
+        message = "Complaint transcribed, translated, and suggestions generated."
+    except TranslationUnavailable as error:
+        complaint.english_translation = ""
+        complaint.processing_status = (
+            Complaint.ProcessingStatus.TRANSLATION_UNAVAILABLE
+        )
+        message = (
+            "Complaint transcribed and suggestions generated; English "
+            "translation is unavailable because no provider is configured."
+        )
+        logger.info(
+            "Translation unavailable for complaint_id=%s reason=%s",
+            complaint.pk,
+            str(error),
+        )
+    except TranslationError as error:
+        complaint.english_translation = ""
+        complaint.processing_status = (
+            Complaint.ProcessingStatus.TRANSLATION_FAILED
+        )
+        message = (
+            "Complaint transcribed and suggestions generated, but English "
+            "translation failed."
+        )
+        logger.error(
+            "Translation failed for complaint_id=%s error_type=%s",
+            complaint.pk,
+            type(error).__name__,
+        )
+
+    complaint.save(
+        update_fields=[
+            "original_transcript",
+            "english_translation",
+            "category",
+            "priority",
+            "summary",
+            "processing_status",
+            "classification_status",
+            "updated_at",
+        ]
+    )
+
     return JsonResponse(
         {
-            "message": "Complaint created successfully.",
+            "message": message,
             "ticket_number": str(complaint.ticket_number),
             "status": complaint.status,
             "transcription_status": "completed",
+            "processing_status": complaint.processing_status,
+            "classification_status": complaint.classification_status,
             "original_transcript": complaint.original_transcript,
+            "english_translation": complaint.english_translation,
+            "category": complaint.category,
+            "priority": complaint.priority,
+            "summary": complaint.summary,
         },
         status=201,
     )
@@ -139,6 +216,12 @@ def get_complaint(request, ticket_number):
             "ticket_number": str(complaint.ticket_number),
             "status": complaint.status,
             "original_transcript": complaint.original_transcript,
+            "processing_status": complaint.processing_status,
+            "english_translation": complaint.english_translation,
+            "category": complaint.category,
+            "priority": complaint.priority,
+            "summary": complaint.summary,
+            "classification_status": complaint.classification_status,
             "created_at": complaint.created_at.isoformat(),
             "updated_at": complaint.updated_at.isoformat(),
         }

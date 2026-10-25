@@ -20,6 +20,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR.parent / ".env")
 
 AUDICLABS_API_KEY = os.getenv("AUDICLABS_API_KEY", "")
+COMPLAINT_TRANSLATION_ADAPTER = os.getenv(
+    "COMPLAINT_TRANSLATION_ADAPTER",
+    "",
+)
 
 
 # Quick-start development settings - unsuitable for production

@@ -6,6 +6,8 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 
 from .models import Complaint
+from .processing import ComplaintSuggestions, suggest_complaint_details
+from .translation import TranslationError
 from .transcription import TranscriptionError, transcribe_complaint
 
 
@@ -16,6 +18,7 @@ class ComplaintTranscriptionTests(TestCase):
         self.media_override = override_settings(
             MEDIA_ROOT=self.media_directory.name,
             AUDICLABS_API_KEY="unit-test-key",
+            COMPLAINT_TRANSLATION_ADAPTER="",
         )
         self.media_override.enable()
         self.addCleanup(self.media_override.disable)
@@ -187,6 +190,12 @@ class ComplaintLookupTests(TestCase):
                 "ticket_number",
                 "status",
                 "original_transcript",
+                "processing_status",
+                "english_translation",
+                "category",
+                "priority",
+                "summary",
+                "classification_status",
                 "created_at",
                 "updated_at",
             },
@@ -252,6 +261,8 @@ class AgentQueueTests(TestCase):
             "category",
             "priority",
             "summary",
+            "processing_status",
+            "classification_status",
             "created_at",
             "updated_at",
         }
@@ -312,3 +323,168 @@ class AgentQueueTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+
+class ComplaintProcessingTests(TestCase):
+    def setUp(self):
+        self.media_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media_directory.cleanup)
+        self.settings_override = override_settings(
+            MEDIA_ROOT=self.media_directory.name,
+            COMPLAINT_TRANSLATION_ADAPTER="",
+        )
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+
+    def _submit_complaint(self):
+        return self.client.post(
+            "/api/complaints/",
+            {
+                "customer_phone": "1234567890",
+                "language": "te",
+                "audio": SimpleUploadedFile(
+                    "complaint.webm",
+                    b"mocked audio",
+                    content_type="audio/webm",
+                ),
+            },
+        )
+
+    @patch("complaints.views.suggest_complaint_details")
+    @patch("complaints.views.translate_to_english")
+    @patch("complaints.views.transcribe_complaint")
+    def test_successful_processing_saves_transcript_translation_and_suggestions(
+        self,
+        transcribe,
+        translate,
+        suggest,
+    ):
+        transcribe.return_value = "My app crashes when I sign in."
+        translate.return_value = "My app crashes when I sign in."
+        suggest.return_value = ComplaintSuggestions(
+            category="technical",
+            priority="normal",
+            summary="My app crashes when I sign in.",
+        )
+
+        response = self._submit_complaint()
+
+        self.assertEqual(response.status_code, 201)
+        complaint = Complaint.objects.get()
+        self.assertEqual(
+            complaint.original_transcript,
+            "My app crashes when I sign in.",
+        )
+        self.assertEqual(
+            complaint.english_translation,
+            "My app crashes when I sign in.",
+        )
+        self.assertEqual(complaint.category, "technical")
+        self.assertEqual(complaint.priority, "normal")
+        self.assertEqual(
+            complaint.summary,
+            "My app crashes when I sign in.",
+        )
+        self.assertEqual(
+            complaint.processing_status,
+            Complaint.ProcessingStatus.COMPLETED,
+        )
+        self.assertEqual(
+            complaint.classification_status,
+            Complaint.ClassificationStatus.SUGGESTED,
+        )
+        self.assertEqual(
+            response.json()["classification_status"],
+            Complaint.ClassificationStatus.SUGGESTED,
+        )
+        translate.assert_called_once_with(
+            "My app crashes when I sign in.",
+            "te",
+        )
+
+    @patch("complaints.views.suggest_complaint_details")
+    @patch("complaints.views.transcribe_complaint")
+    def test_missing_translation_provider_preserves_transcript_and_suggestions(
+        self,
+        transcribe,
+        suggest,
+    ):
+        transcribe.return_value = "I need help with my account."
+        suggest.return_value = ComplaintSuggestions(
+            category="account",
+            priority="normal",
+            summary="I need help with my account.",
+        )
+
+        response = self._submit_complaint()
+
+        self.assertEqual(response.status_code, 201)
+        complaint = Complaint.objects.get()
+        self.assertEqual(
+            complaint.original_transcript,
+            "I need help with my account.",
+        )
+        self.assertEqual(complaint.english_translation, "")
+        self.assertEqual(complaint.category, "account")
+        self.assertEqual(
+            complaint.processing_status,
+            Complaint.ProcessingStatus.TRANSLATION_UNAVAILABLE,
+        )
+        self.assertEqual(
+            response.json()["processing_status"],
+            Complaint.ProcessingStatus.TRANSLATION_UNAVAILABLE,
+        )
+        self.assertIn("translation is unavailable", response.json()["message"])
+
+    @patch("complaints.views.suggest_complaint_details")
+    @patch("complaints.views.translate_to_english")
+    @patch("complaints.views.transcribe_complaint")
+    def test_translation_error_keeps_transcript_and_suggestions(
+        self,
+        transcribe,
+        translate,
+        suggest,
+    ):
+        transcribe.return_value = "I need a refund."
+        translate.side_effect = TranslationError("Provider unavailable")
+        suggest.return_value = ComplaintSuggestions(
+            category="billing",
+            priority="normal",
+            summary="I need a refund.",
+        )
+
+        response = self._submit_complaint()
+
+        self.assertEqual(response.status_code, 201)
+        complaint = Complaint.objects.get()
+        self.assertEqual(complaint.original_transcript, "I need a refund.")
+        self.assertEqual(complaint.english_translation, "")
+        self.assertEqual(
+            complaint.processing_status,
+            Complaint.ProcessingStatus.TRANSLATION_FAILED,
+        )
+        self.assertEqual(
+            complaint.classification_status,
+            Complaint.ClassificationStatus.SUGGESTED,
+        )
+
+    def test_classifier_suggests_category_and_priority_deterministically(self):
+        suggestions = suggest_complaint_details(
+            "Urgent: the payment and billing charge are wrong."
+        )
+
+        self.assertEqual(suggestions.category, "billing")
+        self.assertEqual(suggestions.priority, "high")
+        self.assertTrue(suggestions.summary.endswith("."))
+
+    def test_classifier_uses_fallbacks_when_confidence_is_low(self):
+        suggestions = suggest_complaint_details(
+            "Please look into this when you can."
+        )
+
+        self.assertEqual(suggestions.category, "Uncategorized")
+        self.assertEqual(suggestions.priority, "normal")
+        self.assertEqual(
+            suggestions.summary,
+            "Please look into this when you can.",
+        )

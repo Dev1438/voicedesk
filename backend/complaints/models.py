@@ -5,6 +5,18 @@ from django.db import models
 
 
 class Complaint(models.Model):
+    class ProcessingStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        COMPLETED = "completed", "Completed"
+        TRANSCRIPTION_FAILED = "transcription_failed", "Transcription Failed"
+        TRANSLATION_UNAVAILABLE = "translation_unavailable", "Translation Unavailable"
+        TRANSLATION_FAILED = "translation_failed", "Translation Failed"
+
+    class ClassificationStatus(models.TextChoices):
+        UNREVIEWED = "unreviewed", "Unreviewed"
+        SUGGESTED = "suggested", "Suggested"
+        HUMAN_CONFIRMED = "human_confirmed", "Human Confirmed"
+
     class Status(models.TextChoices):
         SUBMITTED = "submitted", "Submitted"
         PROCESSING = "processing", "Processing"
@@ -33,6 +45,16 @@ class Complaint(models.Model):
     category = models.CharField(max_length=100, blank=True)
     priority = models.CharField(max_length=20, default="normal")
     summary = models.TextField(blank=True)
+    processing_status = models.CharField(
+        max_length=32,
+        choices=ProcessingStatus.choices,
+        default=ProcessingStatus.PENDING,
+    )
+    classification_status = models.CharField(
+        max_length=20,
+        choices=ClassificationStatus.choices,
+        default=ClassificationStatus.UNREVIEWED,
+    )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
