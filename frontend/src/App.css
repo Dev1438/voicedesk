@@ -138,6 +138,42 @@ button {
   overflow-wrap: anywhere;
 }
 
+.denoising-feedback {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-left: 3px solid #8290a8;
+  border-radius: 6px;
+  color: #35435a;
+  background: #f3f5f8;
+  overflow-wrap: anywhere;
+}
+
+.denoising-feedback p {
+  margin: 0;
+}
+
+.denoising-feedback p + p {
+  margin-top: 5px;
+}
+
+.denoising-feedback-success {
+  border-left-color: #24844a;
+  color: #1e633b;
+  background: #edf8f0;
+}
+
+.denoising-feedback-warning {
+  border-left-color: #a36513;
+  color: #70430d;
+  background: #fff6e7;
+}
+
+.denoising-feedback-error {
+  border-left-color: #b83240;
+  color: #84232e;
+  background: #fff0f1;
+}
+
 .lookup-error {
   margin-top: 18px;
   color: #8f2934;
@@ -423,6 +459,15 @@ button {
 }
 
 @media (max-width: 520px) {
+  .complaint-card {
+    padding: 22px 18px;
+  }
+
+  .denoising-feedback {
+    padding: 9px 10px;
+    font-size: 12px;
+  }
+
   .topbar {
     height: 62px;
     padding: 0 18px;

@@ -20,10 +20,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR.parent / ".env")
 
 AUDICLABS_API_KEY = os.getenv("AUDICLABS_API_KEY", "")
+AUDICLABS_DENOISE_MODEL = os.getenv("AUDICLABS_DENOISE_MODEL", "audic-1")
 COMPLAINT_TRANSLATION_ADAPTER = os.getenv(
     "COMPLAINT_TRANSLATION_ADAPTER",
     "",
 )
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
 
 
 # Quick-start development settings - unsuitable for production

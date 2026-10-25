@@ -7,8 +7,9 @@ speech-to-text integration.
 
 > **Assessment/demo status:** VoiceDesk includes complaint submission, ticket
 > lookup, and a basic agent queue. It is not a production-ready support system.
-> In particular, the agent workflow is unauthenticated and no real translation
-> provider is included.
+> In particular, the agent workflow is unauthenticated. Google Cloud
+> Translation is available as a configurable adapter, but requires project
+> setup and credentials and has not been verified against live credentials.
 
 ## Architecture
 
@@ -27,13 +28,18 @@ Complaint processing currently follows this path:
 
 1. Django validates the submitted phone-number format and uploaded file types,
    then saves the complaint and its audio/photo.
-2. If `AUDICLABS_API_KEY` is configured, the backend sends the audio to the
-   AudicLabs speech-to-text API.
-3. A successful transcript is stored as `original_transcript`. The built-in
+2. If `AUDICLABS_API_KEY` is configured, the backend sends the saved audio to
+   the AudicLabs denoising API using the configured model. A valid cleaned WAV
+   is passed in memory to speech-to-text; the original uploaded audio remains
+   unchanged. If denoising fails, the failure is recorded and transcription
+   falls back to the original recording.
+3. The backend sends the selected audio to AudicLabs speech-to-text. A
+   successful transcript is stored as `original_transcript`. The built-in
    category, priority, and summary logic produces **unreviewed suggestions**.
-4. A configured translation adapter may translate the transcript into English.
-   Without one, the complaint is retained and its processing status indicates
-   that translation is unavailable.
+4. The configured translation adapter can translate supported-language
+   transcripts into English. Without an adapter, project, or credentials, the
+   complaint is retained and its processing status indicates translation is
+   unavailable.
 5. The backend checks for an earlier possible duplicate from the same phone
    number within seven days, based on matching normalized text.
 
@@ -44,6 +50,9 @@ Complaint processing currently follows this path:
 - AudicLabs speech-to-text integration, including request-ID logging,
   timeouts, and a single retry when a supported `Retry-After` response is
   received.
+- AudicLabs audio denoising with the configurable `AUDICLABS_DENOISE_MODEL`
+  setting (default `audic-1`), request-ID logging, WAV validation, and a single
+  `Retry-After` retry for 429/503 responses.
 - Ticket UUID generation, saved transcript, ticket status, and processing
   status.
 - Read-only ticket lookup by UUID.
@@ -52,6 +61,8 @@ Complaint processing currently follows this path:
 - Deterministic category, priority, and summary suggestions. These are
   identified as suggestions and are not human-confirmed decisions.
 - Possible-duplicate detection that preserves both tickets.
+- Google Cloud Translation v3 adapter for Telugu, Hindi, English, Tamil, and
+  Kannada source codes, using Application Default Credentials (ADC).
 - Focused Django tests that mock external speech-to-text and translation
   behavior.
 
@@ -72,14 +83,35 @@ contains placeholders only:
 
 ```dotenv
 AUDICLABS_API_KEY=
-COMPLAINT_TRANSLATION_ADAPTER=
+AUDICLABS_DENOISE_MODEL=audic-1
+COMPLAINT_TRANSLATION_ADAPTER=complaints.google_translation.translate_to_english
+GOOGLE_CLOUD_PROJECT=
+GOOGLE_CLOUD_LOCATION=global
+GOOGLE_APPLICATION_CREDENTIALS=
 ```
 
 Set `AUDICLABS_API_KEY` to the key supplied for your assessment to enable
-transcription. Keep the key on the Django backend; never put it in frontend
-code. `COMPLAINT_TRANSLATION_ADAPTER` is an optional Python dotted import path
-for an adapter callable. It is blank by default, and this project does not
-include a real translation-provider implementation.
+denoising and transcription. Keep the key on the Django backend; never put it
+in frontend code. `AUDICLABS_DENOISE_MODEL` chooses the documented denoising
+model (`audic-1` by default; `audic-1` through `audic-5` are available per the
+assessment reference). `COMPLAINT_TRANSLATION_ADAPTER` is an optional Python
+dotted import path; the example selects the included Google Cloud adapter.
+Set `GOOGLE_CLOUD_PROJECT` to the Google Cloud project ID. Keep
+`GOOGLE_CLOUD_LOCATION` as `global` unless your setup requires another
+location. Translation requires the Cloud Translation API enabled and billing
+enabled on the project.
+
+For local development, configure Application Default Credentials (ADC) with
+the Google Cloud CLI:
+
+```powershell
+gcloud auth application-default login
+```
+
+Alternatively, set `GOOGLE_APPLICATION_CREDENTIALS` to the local path of a
+service-account JSON file with the required permissions. Keep that file
+outside the repository, do not commit it, and never paste its contents into
+`.env`. The value is a file path, not the JSON credential itself.
 
 ### 2. Set up and run Django
 
@@ -160,16 +192,17 @@ dedicated automated test script.
 
 ## Current limitations
 
-- **Translation:** No real translation provider is implemented or configured.
-  Indian-language transcripts are not automatically translated into English
-  unless a compatible adapter is supplied.
+- **Translation setup:** The Google Cloud Translation adapter is implemented,
+  but translation remains unavailable until a project, API/billing setup, and
+  valid ADC credentials are configured. No live provider request has been
+  verified as part of these changes. Translation sends transcript text to
+  Google Cloud; review data-handling and cost requirements before enabling it.
 - **Reverse translation and replies:** Agent replies and English-to-customer-
   language translation are not implemented.
 - **Agent reply text-to-speech:** Not implemented.
 - **Authentication and authorization:** The demo agent queue and status update
   have no agent login or role checks. Do not expose them as a production agent
   system.
-- **Audio denoising:** Not implemented.
 - **Notifications:** No email, SMS, or push notifications.
 - **Analytics and supervisor tools:** No reporting dashboard, supervisor
   reassignment, or agent performance tracking.
@@ -211,6 +244,7 @@ dedicated automated test script.
   number, transcript, and transcription/processing status.
 - [ ] Demonstrate ticket lookup and the demo queue, including a status filter
   and status update.
-- [ ] Explain that suggestions are unreviewed, translation is unavailable
-  without a configured provider, and the agent queue is not authenticated.
+- [ ] Explain that suggestions are unreviewed, Google translation requires
+  project credentials and may incur charges, and the agent queue is not
+  authenticated.
 - [ ] Use synthetic/demo data; do not imply missing features are available.

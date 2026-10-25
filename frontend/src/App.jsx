@@ -1,6 +1,61 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
+
+function getDenoisingFeedback(response) {
+  const denoisingStatus =
+    typeof response?.denoising_status === "string"
+      ? response.denoising_status
+      : "";
+  const transcriptionFailed =
+    response?.transcription_status === "failed" ||
+    response?.processing_status === "transcription_failed";
+  const transcriptionCompleted =
+    response?.transcription_status === "completed" ||
+    (typeof response?.processing_status === "string" &&
+      response.processing_status !== "transcription_failed");
+
+  if (transcriptionFailed) {
+    return {
+      status: denoisingStatus,
+      tone: "error",
+      message: "Complaint saved, but transcription failed.",
+    };
+  }
+
+  if (denoisingStatus === "failed") {
+    return {
+      status: denoisingStatus,
+      tone: transcriptionCompleted ? "warning" : "info",
+      message: transcriptionCompleted
+        ? "Denoising failed. The original recording was used, and your complaint was still processed."
+        : "Audio denoising failed.",
+    };
+  }
+
+  if (denoisingStatus === "completed") {
+    return {
+      status: denoisingStatus,
+      tone: "success",
+      message: "Audio denoising completed successfully.",
+    };
+  }
+
+  if (denoisingStatus) {
+    return {
+      status: denoisingStatus,
+      tone: "info",
+      message: "",
+    };
+  }
+
+  return null;
+}
+
+function formatDenoisingStatus(status) {
+  return status.replaceAll("_", " ");
+}
+
 function App() {
   const [loading, setLoading] = useState(false);
   const [ticket, setTicket] = useState(null);
@@ -21,6 +76,8 @@ function App() {
   const [queueError, setQueueError] = useState("");
   const [queueMessage, setQueueMessage] = useState("");
   const [queueStatusDrafts, setQueueStatusDrafts] = useState({});
+  const ticketDenoisingFeedback = getDenoisingFeedback(ticket);
+  const lookupDenoisingFeedback = getDenoisingFeedback(lookupResult);
   const recorderRef = useRef(null);
   const streamRef = useRef(null);
   const chunksRef = useRef([]);
@@ -386,10 +443,29 @@ function App() {
           )}
 
           {lookupResult && (
-            <div className="message lookup-result" role="status">
+            <div className="message lookup-result">
               <h3>Ticket details</h3>
               <p><strong>Ticket number:</strong> {lookupResult.ticket_number}</p>
               <p><strong>Status:</strong> {lookupResult.status}</p>
+              {lookupDenoisingFeedback && (
+                <div
+                  className={`denoising-feedback denoising-feedback-${lookupDenoisingFeedback.tone}`}
+                  role={
+                    lookupDenoisingFeedback.tone === "error"
+                      ? "alert"
+                      : "status"
+                  }
+                  aria-live="polite"
+                >
+                  {lookupDenoisingFeedback.message && (
+                    <p>{lookupDenoisingFeedback.message}</p>
+                  )}
+                  <p>
+                    <strong>Denoising status:</strong>{" "}
+                    {formatDenoisingStatus(lookupDenoisingFeedback.status)}
+                  </p>
+                </div>
+              )}
               <p>
                 <strong>Voice transcription:</strong>{" "}
                 {typeof lookupResult.original_transcript === "string" &&
@@ -691,10 +767,31 @@ function App() {
           )}
 
           {ticket && (
-            <div className="message" role="status">
+            <div className="message">
               <h3>Complaint registered!</h3>
               <p>Ticket number: {ticket.ticket_number}</p>
               <p>Status: {ticket.status}</p>
+              {ticketDenoisingFeedback && (
+                <div
+                  className={`denoising-feedback denoising-feedback-${ticketDenoisingFeedback.tone}`}
+                  role={
+                    ticketDenoisingFeedback.tone === "error"
+                      ? "alert"
+                      : "status"
+                  }
+                  aria-live="polite"
+                >
+                  {ticketDenoisingFeedback.message && (
+                    <p>{ticketDenoisingFeedback.message}</p>
+                  )}
+                  {ticketDenoisingFeedback.status && (
+                    <p>
+                      <strong>Denoising status:</strong>{" "}
+                      {formatDenoisingStatus(ticketDenoisingFeedback.status)}
+                    </p>
+                  )}
+                </div>
+              )}
               {ticket.possible_duplicate &&
                 ticket.possible_duplicate_ticket_number && (
                   <p className="possible-duplicate">

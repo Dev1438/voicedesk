@@ -5,6 +5,11 @@ from django.db import models
 
 
 class Complaint(models.Model):
+    class DenoisingStatus(models.TextChoices):
+        NOT_ATTEMPTED = "not_attempted", "Not Attempted"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
     class ProcessingStatus(models.TextChoices):
         PENDING = "pending", "Pending"
         COMPLETED = "completed", "Completed"
@@ -35,6 +40,11 @@ class Complaint(models.Model):
     audio = models.FileField(
         upload_to="complaints/audio/",
         blank=True,
+    )
+    denoising_status = models.CharField(
+        max_length=16,
+        choices=DenoisingStatus.choices,
+        default=DenoisingStatus.NOT_ATTEMPTED,
     )
     photo = models.ImageField(
         upload_to="complaints/photos/",

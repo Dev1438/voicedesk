@@ -11,6 +11,7 @@ from django.views.decorators.http import require_POST
 
 from .models import Complaint
 from .duplicate_detection import find_possible_duplicate
+from .denoising import DenoisingError, denoise_complaint_audio
 from .processing import suggest_complaint_details
 from .translation import (
     TranslationError,
@@ -28,6 +29,7 @@ def _complaint_payload(complaint):
         "ticket_number": str(complaint.ticket_number),
         "status": complaint.status,
         "language": complaint.language,
+        "denoising_status": complaint.denoising_status,
         "original_transcript": complaint.original_transcript,
         "english_translation": complaint.english_translation,
         "category": complaint.category,
@@ -122,23 +124,62 @@ def create_complaint(request):
 
     complaint.save()
 
+    denoising_error = ""
+    cleaned_audio = None
     try:
-        complaint.original_transcript = transcribe_complaint(complaint)
+        denoising_result = denoise_complaint_audio(complaint)
+        cleaned_audio = denoising_result.audio_bytes
+        complaint.denoising_status = Complaint.DenoisingStatus.COMPLETED
+    except DenoisingError as error:
+        complaint.denoising_status = Complaint.DenoisingStatus.FAILED
+        denoising_error = str(error)
+        logger.warning(
+            "Complaint denoising failed; original audio will be transcribed "
+            "complaint_id=%s",
+            complaint.pk,
+        )
+
+    try:
+        complaint.original_transcript = transcribe_complaint(
+            complaint,
+            audio_bytes=cleaned_audio,
+        )
     except TranscriptionError as error:
         complaint.processing_status = (
             Complaint.ProcessingStatus.TRANSCRIPTION_FAILED
         )
-        complaint.save(update_fields=["processing_status", "updated_at"])
+        complaint.save(
+            update_fields=[
+                "denoising_status",
+                "processing_status",
+                "updated_at",
+            ]
+        )
         return JsonResponse(
             {
-                "message": "Complaint saved, but transcription failed.",
+                "message": (
+                    "Complaint saved. Denoising failed, the original "
+                    "recording was used, and transcription also failed."
+                    if denoising_error
+                    else "Complaint saved, but transcription failed."
+                ),
                 "ticket_number": str(complaint.ticket_number),
                 "status": complaint.status,
                 "transcription_status": "failed",
                 "processing_status": complaint.processing_status,
+                "denoising_status": complaint.denoising_status,
+                "denoising_error": (
+                    "Denoising failed; the original recording was used."
+                    if denoising_error
+                    else None
+                ),
                 "possible_duplicate": False,
                 "possible_duplicate_ticket_number": None,
-                "transcription_error": str(error),
+                "transcription_error": (
+                    "Transcription also failed. Please try again later."
+                    if denoising_error
+                    else str(error)
+                ),
             },
             status=201,
         )
@@ -185,6 +226,11 @@ def create_complaint(request):
             type(error).__name__,
         )
 
+    if denoising_error:
+        message = (
+            "Denoising failed; the original recording was used. " + message
+        )
+
     possible_duplicate = find_possible_duplicate(complaint)
     if possible_duplicate:
         complaint.possible_duplicate_of = possible_duplicate
@@ -197,6 +243,7 @@ def create_complaint(request):
             "priority",
             "summary",
             "processing_status",
+            "denoising_status",
             "classification_status",
             "possible_duplicate_of",
             "updated_at",
@@ -210,6 +257,8 @@ def create_complaint(request):
             "status": complaint.status,
             "transcription_status": "completed",
             "processing_status": complaint.processing_status,
+            "denoising_status": complaint.denoising_status,
+            "denoising_error": denoising_error or None,
             "classification_status": complaint.classification_status,
             "possible_duplicate": complaint.possible_duplicate_of_id is not None,
             "possible_duplicate_ticket_number": (
@@ -235,6 +284,7 @@ def get_complaint(request, ticket_number):
         {
             "ticket_number": str(complaint.ticket_number),
             "status": complaint.status,
+            "denoising_status": complaint.denoising_status,
             "original_transcript": complaint.original_transcript,
             "processing_status": complaint.processing_status,
             "english_translation": complaint.english_translation,

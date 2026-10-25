@@ -1,12 +1,15 @@
+import errno
 import logging
 import mimetypes
 import os
+import socket
 import time
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+from io import BytesIO
 
 import requests
 from django.conf import settings
+
+from .audiclabs_utils import retry_after_seconds
 
 
 logger = logging.getLogger(__name__)
@@ -20,21 +23,70 @@ class TranscriptionError(Exception):
     pass
 
 
-def _retry_after_seconds(value):
-    if not value:
-        return None
+def _exception_chain(error):
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
 
-    try:
-        return max(0, int(value))
-    except ValueError:
-        try:
-            retry_at = parsedate_to_datetime(value)
-        except (TypeError, ValueError, OverflowError):
-            return None
+        for nested in (
+            getattr(current, "__cause__", None),
+            getattr(current, "__context__", None),
+            getattr(current, "reason", None),
+            getattr(current, "original_error", None),
+        ):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+        pending.extend(
+            argument
+            for argument in current.args
+            if isinstance(argument, BaseException)
+        )
 
-        if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=timezone.utc)
-        return max(0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+
+def _request_failure_details(error):
+    exceptions = list(_exception_chain(error))
+    type_names = ",".join(type(item).__name__ for item in exceptions)
+
+    if any(
+        isinstance(item, requests.exceptions.ProxyError)
+        for item in exceptions
+    ):
+        failure_kind = "proxy_error"
+    elif any(
+        isinstance(item, (socket.gaierror, socket.herror))
+        for item in exceptions
+    ):
+        failure_kind = "dns_resolution_error"
+    elif any(
+        isinstance(item, (ConnectionResetError, BrokenPipeError))
+        or getattr(item, "errno", None)
+        in (errno.ECONNRESET, errno.EPIPE)
+        for item in exceptions
+    ):
+        failure_kind = "connection_reset"
+    elif any(
+        isinstance(item, (requests.Timeout, socket.timeout, TimeoutError))
+        for item in exceptions
+    ):
+        failure_kind = "timeout"
+    elif any(
+        getattr(item, "errno", None) == errno.ECONNREFUSED
+        for item in exceptions
+    ):
+        failure_kind = "connection_refused"
+    else:
+        failure_kind = "connection_error"
+
+    return {
+        "error_type": type(error).__name__,
+        "failure_kind": failure_kind,
+        "reason_types": type_names or type(error).__name__,
+    }
 
 
 def _send_transcription(audio_file, filename, content_type, headers):
@@ -47,26 +99,41 @@ def _send_transcription(audio_file, filename, content_type, headers):
     )
 
 
-def _provider_error(response):
-    try:
-        payload = response.json()
-    except ValueError:
-        return "non_json_error"
+def _provider_error_category(status_code):
+    return {
+        400: "invalid_request",
+        401: "authentication_failed",
+        402: "billing_or_credit_issue",
+        403: "access_denied",
+        404: "endpoint_unavailable",
+        413: "audio_too_large",
+        415: "unsupported_audio_format",
+        422: "unsupported_audio_or_model",
+        429: "rate_limited",
+        500: "provider_error",
+        502: "provider_unavailable",
+        503: "provider_unavailable",
+        504: "provider_timeout",
+    }.get(status_code, "provider_error")
 
-    if not isinstance(payload, dict):
-        return "invalid_error_response"
 
-    error = payload.get("error")
-    if isinstance(error, dict):
-        error_type = error.get("type")
-        if isinstance(error_type, str):
-            return error_type[:200]
-
-    detail = payload.get("detail")
-    if isinstance(detail, str):
-        return detail[:200]
-
-    return "unspecified_error"
+def _customer_error_description(category):
+    return {
+        "invalid_request": "check the submitted recording and try again",
+        "authentication_failed": "service authentication failed",
+        "billing_or_credit_issue": "the transcription service is unavailable",
+        "access_denied": "the transcription service is unavailable",
+        "endpoint_unavailable": "the transcription service is unavailable",
+        "audio_too_large": "use a shorter or smaller recording",
+        "unsupported_audio_format": "try recording again in a supported format",
+        "unsupported_audio_or_model": (
+            "check the recording format and try again"
+        ),
+        "rate_limited": "wait before submitting the recording again",
+        "provider_unavailable": "try again later",
+        "provider_timeout": "try again later",
+        "provider_error": "try again later",
+    }.get(category, "try again later")
 
 
 def _validate_response(response):
@@ -78,19 +145,20 @@ def _validate_response(response):
     )
 
     if not response.ok:
-        provider_error = _provider_error(response)
-        retry_after = _retry_after_seconds(
+        error_category = _provider_error_category(response.status_code)
+        retry_after = retry_after_seconds(
             response.headers.get("Retry-After")
         )
         logger.error(
-            "AudicLabs STT failed status=%s request_id=%s provider_error=%s",
+            "AudicLabs STT failed status=%s request_id=%s "
+            "error_category=%s",
             response.status_code,
             request_id or "unavailable",
-            provider_error,
+            error_category,
         )
         message = (
-            f"AudicLabs transcription failed (HTTP {response.status_code}: "
-            f"{provider_error}"
+            f"AudicLabs transcription failed (HTTP {response.status_code}; "
+            f"{_customer_error_description(error_category)}"
         )
         if request_id:
             message += f", request ID {request_id}"
@@ -122,7 +190,7 @@ def _validate_response(response):
     return transcript
 
 
-def transcribe_complaint(complaint):
+def transcribe_complaint(complaint, audio_bytes=None):
     api_key = settings.AUDICLABS_API_KEY
     if not api_key:
         raise TranscriptionError(
@@ -130,13 +198,24 @@ def transcribe_complaint(complaint):
         )
 
     headers = {"Authorization": f"Bearer {api_key}"}
-    filename = os.path.basename(complaint.audio.name)
+    filename = (
+        "complaint.wav"
+        if audio_bytes is not None
+        else os.path.basename(complaint.audio.name)
+    )
     content_type = (
-        mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        "audio/wav"
+        if audio_bytes is not None
+        else mimetypes.guess_type(filename)[0] or "application/octet-stream"
     )
 
     try:
-        with complaint.audio.open("rb") as audio_file:
+        audio_source = (
+            BytesIO(audio_bytes)
+            if audio_bytes is not None
+            else complaint.audio.open("rb")
+        )
+        with audio_source as audio_file:
             try:
                 response = _send_transcription(
                     audio_file,
@@ -145,16 +224,20 @@ def transcribe_complaint(complaint):
                     headers,
                 )
             except requests.RequestException as error:
+                details = _request_failure_details(error)
                 logger.error(
-                    "AudicLabs STT request failed error_type=%s",
-                    type(error).__name__,
+                    "AudicLabs STT request failed error_type=%s "
+                    "failure_kind=%s reason_types=%s",
+                    details["error_type"],
+                    details["failure_kind"],
+                    details["reason_types"],
                 )
                 raise TranscriptionError(
                     "Could not reach AudicLabs to transcribe the recording."
                 ) from error
 
             if response.status_code in (429, 503):
-                retry_after = _retry_after_seconds(
+                retry_after = retry_after_seconds(
                     response.headers.get("Retry-After")
                 )
                 if retry_after is not None:
@@ -175,10 +258,13 @@ def transcribe_complaint(complaint):
                             headers,
                         )
                     except requests.RequestException as error:
+                        details = _request_failure_details(error)
                         logger.error(
                             "AudicLabs STT retry failed error_type=%s "
-                            "request_id=%s",
-                            type(error).__name__,
+                            "failure_kind=%s reason_types=%s request_id=%s",
+                            details["error_type"],
+                            details["failure_kind"],
+                            details["reason_types"],
                             request_id or "unavailable",
                         )
                         raise TranscriptionError(
