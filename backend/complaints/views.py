@@ -1,30 +1,145 @@
 
+import json
 import logging
 import re
+from functools import wraps
 
+from django.contrib.auth import authenticate, login, logout
+from django.core.files.base import ContentFile
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_GET
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.http import require_POST
 
-from .models import Complaint
+from .models import AgentReply, Complaint
 from .duplicate_detection import find_possible_duplicate
 from .denoising import DenoisingError, denoise_complaint_audio
 from .processing import suggest_complaint_details
 from .translation import (
     TranslationError,
     TranslationUnavailable,
+    translate_from_english,
     translate_to_english,
 )
 from .transcription import TranscriptionError, transcribe_complaint
+from .tts import TTSError, synthesize_reply
 
 
 logger = logging.getLogger(__name__)
 
 
-def _complaint_payload(complaint):
+def agent_required(view):
+    @wraps(view)
+    def wrapped_view(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return JsonResponse(
+                {"error": "Agent login is required."},
+                status=401,
+            )
+        if not request.user.is_staff:
+            return JsonResponse(
+                {"error": "Agent access is required."},
+                status=403,
+            )
+        return view(request, *args, **kwargs)
+
+    return wrapped_view
+
+
+def _agent_user_payload(user):
+    return {
+        "username": user.get_username(),
+        "is_staff": user.is_staff,
+    }
+
+
+@ensure_csrf_cookie
+@require_GET
+def auth_session(request):
+    user = request.user
+    is_agent = user.is_authenticated and user.is_staff
+    return JsonResponse(
+        {
+            "authenticated": is_agent,
+            "user": _agent_user_payload(user) if is_agent else None,
+        }
+    )
+
+
+@require_POST
+def agent_login(request):
+    if request.content_type == "application/json":
+        try:
+            payload = json.loads(request.body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return JsonResponse(
+                {"error": "Send a valid JSON request."},
+                status=400,
+            )
+        if not isinstance(payload, dict):
+            return JsonResponse(
+                {"error": "Send login details as a JSON object."},
+                status=400,
+            )
+        username = payload.get("username")
+        password = payload.get("password")
+    else:
+        username = request.POST.get("username")
+        password = request.POST.get("password")
+
+    if not isinstance(username, str) or not isinstance(password, str):
+        return JsonResponse(
+            {"error": "Enter an agent username and password."},
+            status=400,
+        )
+
+    user = authenticate(
+        request,
+        username=username,
+        password=password,
+    )
+    if user is None or not user.is_staff:
+        return JsonResponse(
+            {"error": "Invalid credentials or agent access is not enabled."},
+            status=401,
+        )
+
+    login(request, user)
+    return JsonResponse(
+        {
+            "authenticated": True,
+            "user": _agent_user_payload(user),
+        }
+    )
+
+
+@require_POST
+def agent_logout(request):
+    logout(request)
+    return JsonResponse({"authenticated": False, "user": None})
+
+
+def _reply_payload(request, reply):
+    audio_url = (
+        request.build_absolute_uri(reply.audio.url)
+        if reply.audio
+        else None
+    )
+    return {
+        "id": reply.pk,
+        "english_text": reply.english_text,
+        "translated_text": reply.translated_text,
+        "customer_language": reply.customer_language,
+        "translation_status": reply.translation_status,
+        "audio_status": reply.audio_status,
+        "audio_url": audio_url,
+        "created_at": reply.created_at.isoformat(),
+    }
+
+
+def _complaint_payload(request, complaint):
     return {
         "ticket_number": str(complaint.ticket_number),
         "status": complaint.status,
@@ -43,6 +158,10 @@ def _complaint_payload(complaint):
             if complaint.possible_duplicate_of_id
             else None
         ),
+        "agent_replies": [
+            _reply_payload(request, reply)
+            for reply in complaint.agent_replies.order_by("created_at", "pk")
+        ],
         "created_at": complaint.created_at.isoformat(),
         "updated_at": complaint.updated_at.isoformat(),
     }
@@ -57,8 +176,12 @@ def complaints_collection(request):
 
 
 @require_GET
+@agent_required
 def list_complaints(request):
-    complaints = Complaint.objects.select_related("possible_duplicate_of")
+    complaints = (
+        Complaint.objects.select_related("possible_duplicate_of")
+        .prefetch_related("agent_replies")
+    )
     filter_fields = ("status", "category", "priority", "language")
     for field in filter_fields:
         value = request.GET.get(field, "").strip()
@@ -67,7 +190,12 @@ def list_complaints(request):
 
     complaints = complaints.order_by("-created_at", "-id")
     return JsonResponse(
-        {"complaints": [_complaint_payload(item) for item in complaints]}
+        {
+            "complaints": [
+                _complaint_payload(request, item)
+                for item in complaints
+            ]
+        }
     )
 
 
@@ -302,14 +430,128 @@ def get_complaint(request, ticket_number):
                 if complaint.possible_duplicate_of_id
                 else None
             ),
+            "agent_replies": [
+                _reply_payload(request, reply)
+                for reply in complaint.agent_replies.order_by(
+                    "created_at",
+                    "pk",
+                )
+            ],
             "created_at": complaint.created_at.isoformat(),
             "updated_at": complaint.updated_at.isoformat(),
         }
     )
 
 
-@csrf_exempt
 @require_POST
+@agent_required
+def create_agent_reply(request, ticket_number):
+    complaint = get_object_or_404(Complaint, ticket_number=ticket_number)
+
+    if request.content_type == "application/json":
+        try:
+            payload = json.loads(request.body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return JsonResponse(
+                {"error": "Send a valid JSON request."},
+                status=400,
+            )
+        if not isinstance(payload, dict):
+            return JsonResponse(
+                {"error": "Send the reply as a JSON object."},
+                status=400,
+            )
+        english_text = payload.get("english_text")
+    else:
+        english_text = request.POST.get("english_text")
+
+    if not isinstance(english_text, str) or not english_text.strip():
+        return JsonResponse(
+            {"error": "Enter the English reply text."},
+            status=400,
+        )
+
+    reply = AgentReply.objects.create(
+        complaint=complaint,
+        english_text=english_text.strip(),
+        customer_language=complaint.language,
+    )
+
+    try:
+        reply.translated_text = translate_from_english(
+            reply.english_text,
+            reply.customer_language,
+        )
+        reply.translation_status = AgentReply.TranslationStatus.COMPLETED
+        reply.save(
+            update_fields=[
+                "translated_text",
+                "translation_status",
+                "updated_at",
+            ]
+        )
+    except (TranslationError, TranslationUnavailable) as error:
+        reply.translation_status = AgentReply.TranslationStatus.FAILED
+        reply.save(update_fields=["translation_status", "updated_at"])
+        logger.warning(
+            "Agent reply translation failed complaint_id=%s reply_id=%s "
+            "error_type=%s",
+            complaint.pk,
+            reply.pk,
+            type(error).__name__,
+        )
+        return JsonResponse(
+            {
+                "message": (
+                    "English reply saved, but customer-language translation "
+                    "failed. Audio was not generated."
+                ),
+                "reply": _reply_payload(request, reply),
+            },
+            status=201,
+        )
+
+    try:
+        audio_bytes = synthesize_reply(
+            reply.translated_text,
+            reply.customer_language,
+        )
+    except TTSError as error:
+        reply.audio_status = AgentReply.AudioStatus.FAILED
+        reply.save(update_fields=["audio_status", "updated_at"])
+        logger.warning(
+            "Agent reply audio generation failed complaint_id=%s "
+            "reply_id=%s error_type=%s",
+            complaint.pk,
+            reply.pk,
+            type(error).__name__,
+        )
+        message = (
+            "Reply saved and translated, but audio generation failed."
+        )
+    else:
+        reply.audio.save(
+            f"reply-{reply.pk}.mp3",
+            ContentFile(audio_bytes),
+            save=False,
+        )
+        reply.audio_status = AgentReply.AudioStatus.COMPLETED
+        reply.save(
+            update_fields=["audio", "audio_status", "updated_at"]
+        )
+        message = "Reply saved, translated, and audio generated."
+
+    return JsonResponse(
+        {
+            "message": message,
+            "reply": _reply_payload(request, reply),
+        },
+        status=201,
+    )
+
+
+@require_POST
+@agent_required
 def update_complaint_status(request, ticket_number):
     complaint = get_object_or_404(Complaint, ticket_number=ticket_number)
     status = request.POST.get("status", "").strip()

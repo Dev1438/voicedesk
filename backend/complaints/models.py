@@ -83,3 +83,42 @@ class Complaint(models.Model):
 
     def __str__(self):
         return f"Ticket {self.ticket_number} - {self.status}"
+
+
+class AgentReply(models.Model):
+    class TranslationStatus(models.TextChoices):
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    class AudioStatus(models.TextChoices):
+        NOT_ATTEMPTED = "not_attempted", "Not Attempted"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    complaint = models.ForeignKey(
+        Complaint,
+        on_delete=models.CASCADE,
+        related_name="agent_replies",
+    )
+    english_text = models.TextField()
+    translated_text = models.TextField(blank=True)
+    customer_language = models.CharField(max_length=20)
+    translation_status = models.CharField(
+        max_length=16,
+        choices=TranslationStatus.choices,
+        default=TranslationStatus.FAILED,
+    )
+    audio_status = models.CharField(
+        max_length=16,
+        choices=AudioStatus.choices,
+        default=AudioStatus.NOT_ATTEMPTED,
+    )
+    audio = models.FileField(
+        upload_to="complaints/replies/",
+        blank=True,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Reply {self.pk} for ticket {self.complaint_id}"

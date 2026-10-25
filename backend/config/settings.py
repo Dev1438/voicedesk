@@ -27,6 +27,13 @@ COMPLAINT_TRANSLATION_ADAPTER = os.getenv(
 )
 GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
 GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
+COMPLAINT_REPLY_TRANSLATION_ADAPTER = os.getenv(
+    "COMPLAINT_REPLY_TRANSLATION_ADAPTER",
+    "complaints.google_translation.translate_from_english",
+)
+AUDICLABS_TTS_MODEL = os.getenv("AUDICLABS_TTS_MODEL", "audic-tts-1")
+AUDICLABS_TTS_VOICE = os.getenv("AUDICLABS_TTS_VOICE", "")
+AUDICLABS_TTS_LANGUAGE = os.getenv("AUDICLABS_TTS_LANGUAGE", "")
 
 
 # Quick-start development settings - unsuitable for production
@@ -140,6 +147,11 @@ STATIC_URL = 'static/'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+CORS_ALLOW_CREDENTIALS = True
+CSRF_TRUSTED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]

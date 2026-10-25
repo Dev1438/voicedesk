@@ -2,6 +2,50 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 
+const API_BASE = "http://localhost:8000";
+
+function getCookie(name) {
+  const cookie = document.cookie
+    .split("; ")
+    .find((item) => item.startsWith(`${name}=`));
+  return cookie ? decodeURIComponent(cookie.split("=").slice(1).join("=")) : "";
+}
+
+async function fetchAgentApi(path, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  const headers = new Headers(options.headers || {});
+
+  if (!["GET", "HEAD", "OPTIONS", "TRACE"].includes(method)) {
+    let csrfToken = getCookie("csrftoken");
+    if (!csrfToken) {
+      const csrfResponse = await fetch(`${API_BASE}/api/auth/session/`, {
+        credentials: "include",
+      });
+      if (!csrfResponse.ok) {
+        throw new Error("Unable to prepare a secure agent request.");
+      }
+      csrfToken = getCookie("csrftoken");
+    }
+    if (!csrfToken) {
+      throw new Error("Unable to prepare a secure agent request.");
+    }
+    headers.set("X-CSRFToken", csrfToken);
+  }
+
+  return fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+    credentials: "include",
+  });
+}
+
+async function requestAgentQueue(status) {
+  const query = status ? `?status=${encodeURIComponent(status)}` : "";
+  const response = await fetchAgentApi(`/api/complaints/${query}`);
+  const data = await response.json().catch(() => ({}));
+  return { response, data };
+}
+
 function getDenoisingFeedback(response) {
   const denoisingStatus =
     typeof response?.denoising_status === "string"
@@ -56,7 +100,58 @@ function formatDenoisingStatus(status) {
   return status.replaceAll("_", " ");
 }
 
+function AgentReplyHistory({ replies }) {
+  if (!Array.isArray(replies) || replies.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="agent-reply-history">
+      <h4>Agent replies</h4>
+      {replies.map((reply) => (
+        <article className="agent-reply" key={reply.id}>
+          {reply.translated_text && (
+            <p>
+              <strong>Reply:</strong> {reply.translated_text}
+            </p>
+          )}
+          {reply.translation_status === "failed" && (
+            <p className="field-help">
+              Reply translation is unavailable.
+            </p>
+          )}
+          {reply.audio_url ? (
+            <audio
+              controls
+              preload="none"
+              src={reply.audio_url}
+              aria-label="Play agent reply"
+            >
+              Your browser does not support audio playback.
+            </audio>
+          ) : (
+            <p className="field-help">
+              Audio reply is unavailable
+              {reply.audio_status
+                ? ` (${reply.audio_status.replaceAll("_", " ")})`
+                : ""}
+              .
+            </p>
+          )}
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function App() {
+  const [activePortal, setActivePortal] = useState("customer");
+  const [agentUser, setAgentUser] = useState(null);
+  const [agentSessionLoading, setAgentSessionLoading] = useState(false);
+  const [agentAuthError, setAgentAuthError] = useState("");
+  const [agentUsername, setAgentUsername] = useState("");
+  const [agentPassword, setAgentPassword] = useState("");
+  const [agentLoginLoading, setAgentLoginLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [ticket, setTicket] = useState(null);
   const [language, setLanguage] = useState("te");
@@ -76,6 +171,8 @@ function App() {
   const [queueError, setQueueError] = useState("");
   const [queueMessage, setQueueMessage] = useState("");
   const [queueStatusDrafts, setQueueStatusDrafts] = useState({});
+  const [replyDrafts, setReplyDrafts] = useState({});
+  const [replySubmittingTicket, setReplySubmittingTicket] = useState("");
   const ticketDenoisingFeedback = getDenoisingFeedback(ticket);
   const lookupDenoisingFeedback = getDenoisingFeedback(lookupResult);
   const recorderRef = useRef(null);
@@ -88,15 +185,14 @@ function App() {
     setQueueMessage("");
 
     try {
-      const query = queueStatus
-        ? `?status=${encodeURIComponent(queueStatus)}`
-        : "";
-      const response = await fetch(
-        `http://127.0.0.1:8000/api/complaints/${query}`
-      );
-      const data = await response.json().catch(() => ({}));
+      const { response, data } = await requestAgentQueue(queueStatus);
 
       if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          setAgentUser(null);
+          setAgentAuthError("Your agent session has expired. Please sign in again.");
+          return;
+        }
         throw new Error(
           data.error || "Unable to load the ticket queue. Please try again."
         );
@@ -113,33 +209,79 @@ function App() {
   }, [queueStatus]);
 
   useEffect(() => {
+    if (activePortal !== "agent") {
+      return undefined;
+    }
+
     let isCurrent = true;
 
-    async function loadQueueForFilter() {
+    async function checkAgentSession() {
+      setAgentSessionLoading(true);
+      setAgentAuthError("");
       try {
-        const query = queueStatus
-          ? `?status=${encodeURIComponent(queueStatus)}`
-          : "";
-        const response = await fetch(
-          `http://127.0.0.1:8000/api/complaints/${query}`
-        );
+        const response = await fetch(`${API_BASE}/api/auth/session/`, {
+          credentials: "include",
+        });
         const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
+          throw new Error(data.error || "Unable to check agent login.");
+        }
+        if (isCurrent) {
+          setAgentUser(data.authenticated ? data.user : null);
+          if (!data.authenticated) {
+            setQueueTickets([]);
+          }
+        }
+      } catch (error) {
+        if (isCurrent) {
+          setAgentUser(null);
+          setAgentAuthError(error.message || "Unable to check agent login.");
+        }
+      } finally {
+        if (isCurrent) {
+          setAgentSessionLoading(false);
+        }
+      }
+    }
+
+    checkAgentSession();
+    return () => {
+      isCurrent = false;
+    };
+  }, [activePortal]);
+
+  useEffect(() => {
+    if (activePortal !== "agent" || !agentUser?.is_staff) {
+      return undefined;
+    }
+
+    let isCurrent = true;
+    async function refreshQueueForFilter() {
+      setQueueLoading(true);
+      setQueueError("");
+      setQueueMessage("");
+      try {
+        const { response, data } = await requestAgentQueue(queueStatus);
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            setAgentUser(null);
+            setAgentAuthError(
+              "Your agent session has expired. Please sign in again."
+            );
+            return;
+          }
           throw new Error(
             data.error || "Unable to load the ticket queue. Please try again."
           );
         }
-
         if (isCurrent) {
           setQueueTickets(data.complaints || []);
-          setQueueError("");
         }
       } catch (error) {
         if (isCurrent) {
           setQueueError(
-            error.message ||
-              "Unable to connect to the server. Please try again."
+            error.message || "Unable to connect to the server. Please try again."
           );
         }
       } finally {
@@ -148,12 +290,59 @@ function App() {
         }
       }
     }
-
-    loadQueueForFilter();
+    refreshQueueForFilter();
     return () => {
       isCurrent = false;
     };
-  }, [queueStatus]);
+  }, [activePortal, agentUser, queueStatus]);
+
+  async function handleAgentLogin(event) {
+    event.preventDefault();
+    setAgentLoginLoading(true);
+    setAgentAuthError("");
+
+    try {
+      const response = await fetchAgentApi("/api/auth/login/", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: agentUsername,
+          password: agentPassword,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Unable to sign in.");
+      }
+
+      setAgentUser(data.user);
+      setAgentPassword("");
+      setQueueLoading(true);
+    } catch (error) {
+      setAgentAuthError(error.message || "Unable to connect to the server.");
+    } finally {
+      setAgentLoginLoading(false);
+    }
+  }
+
+  async function handleAgentLogout() {
+    setAgentAuthError("");
+    try {
+      const response = await fetchAgentApi("/api/auth/logout/", {
+        method: "POST",
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Unable to sign out.");
+      }
+      setAgentUser(null);
+      setQueueTickets([]);
+      setQueueMessage("");
+      setQueueError("");
+    } catch (error) {
+      setAgentAuthError(error.message || "Unable to connect to the server.");
+    }
+  }
 
   async function updateQueueTicketStatus(complaint) {
     const status =
@@ -167,8 +356,8 @@ function App() {
     setQueueMessage("");
 
     try {
-      const response = await fetch(
-        `http://127.0.0.1:8000/api/complaints/${encodeURIComponent(
+      const response = await fetchAgentApi(
+        `/api/complaints/${encodeURIComponent(
           complaint.ticket_number
         )}/status/`,
         {
@@ -182,6 +371,10 @@ function App() {
       const data = await response.json().catch(() => ({}));
 
       if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          setAgentUser(null);
+          setAgentAuthError("Your agent session has expired. Please sign in again.");
+        }
         throw new Error(
           data.error || "Unable to update this ticket. Please try again."
         );
@@ -212,6 +405,92 @@ function App() {
     }
   }
 
+  async function submitAgentReply(event, complaint) {
+    event.preventDefault();
+    if (replySubmittingTicket) {
+      return;
+    }
+
+    const englishText = (replyDrafts[complaint.ticket_number] || "").trim();
+    if (!englishText) {
+      setQueueError("Enter an English reply before submitting.");
+      return;
+    }
+
+    setReplySubmittingTicket(complaint.ticket_number);
+    setQueueError("");
+    setQueueMessage("");
+
+    try {
+      const response = await fetchAgentApi(
+        `/api/complaints/${encodeURIComponent(
+          complaint.ticket_number
+        )}/replies/`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ english_text: englishText }),
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          setAgentUser(null);
+          setAgentAuthError("Your agent session has expired. Please sign in again.");
+        }
+        throw new Error(
+          data.error || "Unable to save this reply. Please try again."
+        );
+      }
+
+      const savedReply = data.reply;
+      setQueueTickets((currentTickets) =>
+        currentTickets.map((ticketItem) =>
+          ticketItem.ticket_number === complaint.ticket_number
+            ? {
+                ...ticketItem,
+                agent_replies: [
+                  ...(Array.isArray(ticketItem.agent_replies)
+                    ? ticketItem.agent_replies
+                    : []),
+                  savedReply,
+                ],
+              }
+            : ticketItem
+        )
+      );
+      setLookupResult((current) =>
+        current?.ticket_number === complaint.ticket_number
+          ? {
+              ...current,
+              agent_replies: [
+                ...(Array.isArray(current.agent_replies)
+                  ? current.agent_replies
+                  : []),
+                savedReply,
+              ],
+            }
+          : current
+      );
+      setReplyDrafts((drafts) => ({
+        ...drafts,
+        [complaint.ticket_number]: "",
+      }));
+      setQueueMessage(
+        data.message || "Reply saved. Check its translation and audio status."
+      );
+    } catch (error) {
+      setQueueError(
+        error.message || "Unable to connect to the server. Please try again."
+      );
+    } finally {
+      setReplySubmittingTicket("");
+    }
+  }
+
   async function handleTicketLookup(event) {
     event.preventDefault();
     if (lookupLoading) {
@@ -224,7 +503,7 @@ function App() {
 
     try {
       const response = await fetch(
-        `http://127.0.0.1:8000/api/complaints/${encodeURIComponent(
+        `${API_BASE}/api/complaints/${encodeURIComponent(
           lookupTicketNumber.trim()
         )}/`
       );
@@ -338,7 +617,7 @@ function App() {
       }
 
       const response = await fetch(
-        "http://127.0.0.1:8000/api/complaints/",
+        `${API_BASE}/api/complaints/`,
         {
           method: "POST",
           body: formData,
@@ -392,19 +671,49 @@ function App() {
           <span className="brand-icon">V</span>
           VoiceDesk
         </a>
-        <span className="header-label">Customer Portal</span>
+        <nav className="portal-switcher" aria-label="Choose portal view">
+          <button
+            className={activePortal === "customer" ? "is-active" : ""}
+            type="button"
+            aria-pressed={activePortal === "customer"}
+            onClick={() => setActivePortal("customer")}
+          >
+            Customer Portal
+          </button>
+          <button
+            className={activePortal === "agent" ? "is-active" : ""}
+            type="button"
+            aria-pressed={activePortal === "agent"}
+            onClick={() => {
+              setQueueLoading(true);
+              setAgentSessionLoading(true);
+              setAgentAuthError("");
+              setActivePortal("agent");
+            }}
+          >
+            Agent Portal
+          </button>
+        </nav>
       </header>
 
       <main className="page-content" id="home">
         <section className="intro">
-          <span className="eyebrow">WE'RE HERE TO HELP</span>
-          <h1>Tell us what happened.</h1>
+          <span className="eyebrow">
+            {activePortal === "customer" ? "CUSTOMER PORTAL" : "AGENT PORTAL"}
+          </span>
+          <h1>
+            {activePortal === "customer"
+              ? "Tell us what happened."
+              : "Manage customer complaints."}
+          </h1>
           <p>
-            Speak in your preferred language. We'll help you turn your
-            complaint into a ticket our support team can understand.
+            {activePortal === "customer"
+              ? "Submit a complaint in your preferred language, track its status, and listen to replies."
+              : "Sign in to review complaints, update ticket status, and send translated replies."}
           </p>
         </section>
 
+        {activePortal === "customer" && (
         <section className="complaint-card ticket-lookup">
           <div className="card-heading">
             <div>
@@ -466,6 +775,7 @@ function App() {
                   </p>
                 </div>
               )}
+              <AgentReplyHistory replies={lookupResult.agent_replies} />
               <p>
                 <strong>Voice transcription:</strong>{" "}
                 {typeof lookupResult.original_transcript === "string" &&
@@ -491,23 +801,37 @@ function App() {
             </div>
           )}
         </section>
+        )}
 
+        {activePortal === "agent" && (
+          agentSessionLoading ? (
+            <section className="complaint-card" role="status">
+              Checking agent session...
+            </section>
+          ) : agentUser?.is_staff ? (
         <section className="complaint-card agent-queue">
           <div className="card-heading">
             <div>
-              <h2>Agent ticket queue (demo)</h2>
-              <p>
-                Demo workflow only; agent access is not authenticated.
-              </p>
+              <h2>Agent ticket queue</h2>
+              <p>Signed in as {agentUser.username}</p>
             </div>
-            <button
-              className="button button-primary"
-              type="button"
-              onClick={loadAgentQueue}
-              disabled={queueLoading}
-            >
-              {queueLoading ? "Refreshing..." : "Refresh"}
-            </button>
+            <div className="agent-actions">
+              <button
+                className="button button-secondary"
+                type="button"
+                onClick={handleAgentLogout}
+              >
+                Sign out
+              </button>
+              <button
+                className="button button-primary"
+                type="button"
+                onClick={loadAgentQueue}
+                disabled={queueLoading}
+              >
+                {queueLoading ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
           </div>
 
           <div className="field queue-filter">
@@ -538,6 +862,11 @@ function App() {
           {queueMessage && (
             <div className="message" role="status">
               {queueMessage}
+            </div>
+          )}
+          {agentAuthError && (
+            <div className="message lookup-error" role="alert">
+              {agentAuthError}
             </div>
           )}
 
@@ -596,6 +925,36 @@ function App() {
                     {queueTicket.english_translation}
                   </p>
                 )}
+                <AgentReplyHistory replies={queueTicket.agent_replies} />
+                <form
+                  className="agent-reply-form"
+                  onSubmit={(event) => submitAgentReply(event, queueTicket)}
+                >
+                  <label htmlFor={`agent-reply-${queueTicket.ticket_number}`}>
+                    Agent reply in English
+                  </label>
+                  <textarea
+                    id={`agent-reply-${queueTicket.ticket_number}`}
+                    value={replyDrafts[queueTicket.ticket_number] || ""}
+                    onChange={(event) =>
+                      setReplyDrafts((drafts) => ({
+                        ...drafts,
+                        [queueTicket.ticket_number]: event.target.value,
+                      }))
+                    }
+                    rows={3}
+                    required
+                  />
+                  <button
+                    className="button button-primary"
+                    type="submit"
+                    disabled={Boolean(replySubmittingTicket)}
+                  >
+                    {replySubmittingTicket === queueTicket.ticket_number
+                      ? "Saving reply..."
+                      : "Send translated reply"}
+                  </button>
+                </form>
                 <p>
                   <strong>Created:</strong>{" "}
                   {new Date(queueTicket.created_at).toLocaleString()}
@@ -647,7 +1006,57 @@ function App() {
             ))}
           </div>
         </section>
+          ) : (
+            <section className="complaint-card agent-login">
+              <div className="card-heading">
+                <div>
+                  <h2>Agent sign in</h2>
+                  <p>Use an authorized Django staff account to access the queue.</p>
+                </div>
+              </div>
+              {agentAuthError && (
+                <div className="message lookup-error" role="alert">
+                  {agentAuthError}
+                </div>
+              )}
+              <form onSubmit={handleAgentLogin}>
+                <div className="field">
+                  <label htmlFor="agent-username">Username</label>
+                  <input
+                    id="agent-username"
+                    autoComplete="username"
+                    value={agentUsername}
+                    onChange={(event) => setAgentUsername(event.target.value)}
+                    required
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="agent-password">Password</label>
+                  <input
+                    id="agent-password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={agentPassword}
+                    onChange={(event) => setAgentPassword(event.target.value)}
+                    required
+                  />
+                </div>
+                <button
+                  className="button button-primary"
+                  type="submit"
+                  disabled={agentLoginLoading}
+                >
+                  {agentLoginLoading ? "Signing in..." : "Sign in"}
+                </button>
+              </form>
+              <p className="field-help">
+                Demo UI separation only; access is enforced by the backend.
+              </p>
+            </section>
+          )
+        )}
 
+        {activePortal === "customer" && (
         <form className="complaint-card" onSubmit={handleSubmit}>
           <div className="card-heading">
             <div>
@@ -828,6 +1237,7 @@ function App() {
                   {ticket.english_translation}
                 </p>
               )}
+              <AgentReplyHistory replies={ticket.agent_replies} />
             </div>
           )}
 
@@ -841,9 +1251,10 @@ function App() {
           </button>
 
           <p className="privacy-note">
-            Your complaint details should be handled securely.
+            Demo only. Do not submit sensitive personal information.
           </p>
         </form>
+        )}
 
         <footer className="footer">
           VoiceDesk · Multilingual support for everyone

@@ -7,9 +7,9 @@ speech-to-text integration.
 
 > **Assessment/demo status:** VoiceDesk includes complaint submission, ticket
 > lookup, and a basic agent queue. It is not a production-ready support system.
-> In particular, the agent workflow is unauthenticated. Google Cloud
-> Translation is available as a configurable adapter, but requires project
-> setup and credentials and has not been verified against live credentials.
+> Agent queue, status, and reply operations require a Django staff session.
+> Google Cloud Translation is available as a configurable adapter, but
+> requires project setup and credentials.
 
 ## Architecture
 
@@ -17,9 +17,9 @@ speech-to-text integration.
   audio in the browser, optionally attaches a photo, submits complaints, looks
   up tickets, and shows a basic agent queue.
 - **Backend:** Django 5.2 and Django REST Framework, under `backend/`.
-  Complaint handling, AudicLabs transcription, optional translation adapter,
-  deterministic suggestions, duplicate detection, and the API routes are in
-  `backend/complaints/`.
+  Complaint handling, AudicLabs transcription/TTS, Google translation
+  adapters, deterministic suggestions, duplicate detection, agent replies,
+  and API routes are in `backend/complaints/`.
 - **Database:** SQLite at `backend/db.sqlite3` by default.
 - **Uploaded files:** Django local media storage under `backend/media/` by
   default. It is not cloud/object storage.
@@ -63,7 +63,13 @@ Complaint processing currently follows this path:
 - Possible-duplicate detection that preserves both tickets.
 - Google Cloud Translation v3 adapter for Telugu, Hindi, English, Tamil, and
   Kannada source codes, using Application Default Credentials (ADC).
-- Focused Django tests that mock external speech-to-text and translation
+- Persistent agent replies with English text, customer-language translation,
+  translation/audio statuses, and MP3 audio where TTS succeeds.
+- AudicLabs TTS adapter using `audic-tts-1` and a configured voice. TTS
+  failures do not discard either reply text.
+- Customer ticket lookup includes saved translated replies and an audio player
+  when audio generation succeeded.
+- Focused Django tests that mock external speech-to-text, translation, and TTS
   behavior.
 
 ## Windows setup
@@ -84,7 +90,11 @@ contains placeholders only:
 ```dotenv
 AUDICLABS_API_KEY=
 AUDICLABS_DENOISE_MODEL=audic-1
+AUDICLABS_TTS_MODEL=audic-tts-1
+AUDICLABS_TTS_VOICE=
+AUDICLABS_TTS_LANGUAGE=
 COMPLAINT_TRANSLATION_ADAPTER=complaints.google_translation.translate_to_english
+COMPLAINT_REPLY_TRANSLATION_ADAPTER=complaints.google_translation.translate_from_english
 GOOGLE_CLOUD_PROJECT=
 GOOGLE_CLOUD_LOCATION=global
 GOOGLE_APPLICATION_CREDENTIALS=
@@ -100,6 +110,21 @@ Set `GOOGLE_CLOUD_PROJECT` to the Google Cloud project ID. Keep
 `GOOGLE_CLOUD_LOCATION` as `global` unless your setup requires another
 location. Translation requires the Cloud Translation API enabled and billing
 enabled on the project.
+
+For agent replies, set `AUDICLABS_TTS_VOICE` to a voice identifier available
+to your AudicLabs workspace. The application uses the complaint language as
+the TTS language by default. Use `AUDICLABS_TTS_LANGUAGE` only when a
+workspace-specific language value is needed. Verify both values in the
+authenticated AudicLabs API explorer before using TTS. Reply translation uses
+`COMPLAINT_REPLY_TRANSLATION_ADAPTER` and the Google adapter by default.
+`AUDICLABS_TTS_VOICE` must be set to a voice identifier available to the
+workspace; consult the AudicLabs `GET /v1/tts/voices` lookup. The reply uses
+the complaint's language code by default; optionally set
+`AUDICLABS_TTS_LANGUAGE` to a provider-supported language value from
+`GET /v1/tts/languages`. These lookup response schemas are not documented in
+the public API pages checked for this implementation, so the application
+does not parse or call those lookup endpoints automatically. Verify selected
+values in the authenticated AudicLabs API explorer before enabling TTS.
 
 For local development, configure Application Default Credentials (ADC) with
 the Google Cloud CLI:
@@ -123,10 +148,16 @@ py -m venv .venv
 python -m pip install -r requirements.txt
 Set-Location backend
 python manage.py migrate
+python manage.py createsuperuser
 python manage.py runserver
 ```
 
-The backend API is available at `http://127.0.0.1:8000/`. If PowerShell blocks
+Create an agent account with Django's interactive `createsuperuser` command;
+do not put account credentials in source files or environment templates.
+Staff accounts can sign in to the Agent Portal. The API uses Django sessions
+and CSRF protection for agent login, logout, status updates, and replies.
+
+The backend API is available at `http://localhost:8000/`. If PowerShell blocks
 virtual-environment activation, use the Python executable directly instead:
 
 ```powershell
@@ -146,8 +177,9 @@ npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite, normally `http://localhost:5173/`. The
-frontend currently calls the backend at `http://127.0.0.1:8000/`.
+Open the local URL printed by Vite, normally `http://localhost:5173/`. Use
+`localhost` for both frontend and backend so browser session cookies remain
+same-site; the frontend calls `http://localhost:8000/`.
 Microphone access requires browser permission; localhost is generally treated
 as a secure context by modern browsers.
 
@@ -155,14 +187,23 @@ as a secure context by modern browsers.
 
 - `POST /api/complaints/` — submit a multipart complaint (`customer_phone`,
   `language`, required `audio`, and optional `photo`).
-- `GET /api/complaints/` — list tickets newest first; optional query filters:
-  `status`, `category`, `priority`, and `language`.
+- `GET /api/auth/session/` — initialize/read the agent session and CSRF cookie.
+- `POST /api/auth/login/` — authenticate a staff account with JSON
+  `{"username":"...","password":"..."}`.
+- `POST /api/auth/logout/` — end the current session.
+- `GET /api/complaints/` — list tickets newest first (staff session required);
+  optional query filters: `status`, `category`, `priority`, and `language`.
 - `GET /api/complaints/<ticket_uuid>/` — retrieve ticket details.
+- `POST /api/complaints/<ticket_uuid>/replies/` — save an English agent reply,
+  translate it into the ticket's customer language, and attempt MP3 generation
+  (staff session and CSRF token required). Send JSON such as
+  `{"english_text":"Your repair is complete."}`.
 - `POST /api/complaints/<ticket_uuid>/status/` — update a ticket to one of the
-  existing status values.
+  existing status values (staff session and CSRF token required).
 
-The queue and status-update routes are demo endpoints, not authenticated agent
-access.
+Saved agent replies are included in the complaint list and public ticket lookup
+payloads. Customer submission and ticket lookup remain accessible without an
+agent login.
 
 ## Migrations and tests
 
@@ -187,8 +228,9 @@ npm run build --prefix frontend
 ```
 
 The Django tests mock external services; they do not verify live AudicLabs
-credentials or provider behavior. The frontend has lint/build scripts but no
-dedicated automated test script.
+credentials or provider behavior. Agent-reply tests mock translation and TTS;
+no external provider calls are made by the test suite. The frontend has
+lint/build scripts but no dedicated automated test script.
 
 ## Current limitations
 
@@ -197,12 +239,18 @@ dedicated automated test script.
   valid ADC credentials are configured. No live provider request has been
   verified as part of these changes. Translation sends transcript text to
   Google Cloud; review data-handling and cost requirements before enabling it.
-- **Reverse translation and replies:** Agent replies and English-to-customer-
-  language translation are not implemented.
-- **Agent reply text-to-speech:** Not implemented.
-- **Authentication and authorization:** The demo agent queue and status update
-  have no agent login or role checks. Do not expose them as a production agent
-  system.
+- **Agent access:** The queue, status, and reply endpoints require a logged-in
+  Django staff account. This demo has no finer-grained agent roles or
+  supervisor permissions.
+- **Agent reply providers:** Configure a valid AudicLabs voice identifier and
+  ensure the Google Cloud reverse-translation adapter is available. Replies
+  are retained when translation or audio generation fails; status fields show
+  which stages completed.
+- **TTS metadata:** The public AudicLabs documentation confirms MP3 output but
+  does not publish the exact success `Content-Type`, audio headers, or lookup
+  response schemas. The adapter consumes the response body as binary and
+  checks for an MP3 signature; the voice and optional language must be
+  configured using values verified in the authenticated API explorer.
 - **Notifications:** No email, SMS, or push notifications.
 - **Analytics and supervisor tools:** No reporting dashboard, supervisor
   reassignment, or agent performance tracking.
@@ -221,16 +269,20 @@ dedicated automated test script.
 - AudicLabs receives uploaded complaint audio when transcription is enabled.
   Review the assessment's privacy and data-handling requirements before
   submitting real customer recordings.
+- English agent replies are sent to Google Cloud Translation and translated
+  reply text is sent to AudicLabs TTS when those integrations are configured.
+  Review provider privacy, retention, and billing requirements before use.
 - The application stores phone numbers and uploaded audio/photos in its local
   database/media directory. Protect those files and use synthetic data for
   demos whenever possible.
 - Complaint API responses omit the customer's phone number and uploaded file
-  URLs, but the application does not provide authentication, authorization,
-  rate limiting, or phone-number verification.
+  URLs. Agent-only queue and write operations require a staff session; public
+  ticket lookup, complaint submission, rate limiting, and phone-number
+  verification remain unauthenticated/unavailable.
 - **Do not deploy with the current development settings.** Before deployment,
   replace the development `SECRET_KEY` with a securely managed secret, disable
-  `DEBUG`, configure allowed hosts and production security settings, and add
-  authentication/authorization and protected storage.
+  `DEBUG`, configure allowed hosts and production security settings, and review
+  authentication, authorization, and protected storage for production needs.
 
 ## Assessment demo checklist
 
@@ -242,9 +294,11 @@ dedicated automated test script.
   non-sensitive test complaint.
 - [ ] If authorized, submit the test recording and check the returned ticket
   number, transcript, and transcription/processing status.
-- [ ] Demonstrate ticket lookup and the demo queue, including a status filter
-  and status update.
+- [ ] Create an agent account with `python manage.py createsuperuser`, then
+  sign in to demonstrate the protected queue, status filter, and status update.
+- [ ] If configured and authorized, submit a synthetic English agent reply and
+  demonstrate the translated reply and generated MP3 playback.
 - [ ] Explain that suggestions are unreviewed, Google translation requires
-  project credentials and may incur charges, and the agent queue is not
-  authenticated.
+  project credentials and may incur charges, and TTS requires a configured
+  voice. The portal is a demo, not production security.
 - [ ] Use synthetic/demo data; do not imply missing features are available.

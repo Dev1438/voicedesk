@@ -1,4 +1,5 @@
 import io
+import json
 import socket
 import tempfile
 import wave
@@ -17,7 +18,8 @@ from google.api_core.exceptions import (
 )
 from google.auth.exceptions import DefaultCredentialsError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
+from django.contrib.auth import get_user_model
+from django.test import Client, TestCase, override_settings
 from django.utils import timezone
 
 from .duplicate_detection import find_possible_duplicate
@@ -26,11 +28,126 @@ from .denoising import (
     DenoisingResult,
     denoise_complaint_audio,
 )
-from .google_translation import translate_to_english as google_translate_to_english
-from .models import Complaint
+from .google_translation import (
+    translate_from_english as google_translate_from_english,
+    translate_to_english as google_translate_to_english,
+)
+from .models import AgentReply, Complaint
 from .processing import ComplaintSuggestions, suggest_complaint_details
 from .translation import TranslationError, TranslationUnavailable
 from .transcription import TranscriptionError, transcribe_complaint
+from .tts import TTSError, synthesize_reply
+
+
+class AudicLabsTTSTests(TestCase):
+    @override_settings(
+        AUDICLABS_API_KEY="unit-test-key",
+        AUDICLABS_TTS_MODEL="audic-tts-1",
+        AUDICLABS_TTS_VOICE="configured-voice",
+        AUDICLABS_TTS_LANGUAGE="",
+    )
+    @patch("complaints.tts.requests.post")
+    def test_sends_documented_json_and_returns_mp3_bytes(self, post):
+        mp3_bytes = b"ID3\x04\x00\x00mock mp3 payload"
+        response = Mock(
+            ok=True,
+            status_code=200,
+            content=mp3_bytes,
+            headers={"X-Request-Id": "tts-request-1"},
+        )
+        post.return_value = response
+
+        audio_bytes = synthesize_reply("नमस्ते", "hi")
+
+        self.assertEqual(audio_bytes, mp3_bytes)
+        post.assert_called_once_with(
+            "https://api.audiclabs.com/v1/tts/speech",
+            headers={"Authorization": "Bearer unit-test-key"},
+            json={
+                "model": "audic-tts-1",
+                "input": "नमस्ते",
+                "voice": "configured-voice",
+                "language": "hi",
+                "stream": False,
+            },
+            timeout=(5, 120),
+        )
+
+    @override_settings(
+        AUDICLABS_API_KEY="unit-test-key",
+        AUDICLABS_TTS_MODEL="audic-tts-1",
+        AUDICLABS_TTS_VOICE="configured-voice",
+        AUDICLABS_TTS_LANGUAGE="hi-IN",
+    )
+    @patch("complaints.tts.requests.post")
+    def test_uses_configured_language_override(self, post):
+        post.return_value = Mock(
+            ok=True,
+            status_code=200,
+            content=b"\xff\xfbmock mp3 payload",
+            headers={},
+        )
+
+        synthesize_reply("Hello", "hi")
+
+        self.assertEqual(
+            post.call_args.kwargs["json"]["language"],
+            "hi-IN",
+        )
+
+    @override_settings(
+        AUDICLABS_API_KEY="unit-test-key",
+        AUDICLABS_TTS_MODEL="audic-tts-1",
+        AUDICLABS_TTS_VOICE="configured-voice",
+    )
+    @patch("complaints.tts.requests.post")
+    def test_provider_errors_are_safe_and_do_not_retry(self, post):
+        for status_code in (401, 402, 403, 429, 503):
+            with self.subTest(status_code=status_code):
+                post.reset_mock()
+                post.return_value = Mock(
+                    ok=False,
+                    status_code=status_code,
+                    content=b"private provider details",
+                    headers={"X-Request-Id": "tts-error-id"},
+                )
+                with self.assertRaises(TTSError) as error:
+                    synthesize_reply("Hello", "hi")
+
+                self.assertNotIn(
+                    "private provider details",
+                    str(error.exception),
+                )
+                post.assert_called_once()
+
+    @override_settings(
+        AUDICLABS_API_KEY="unit-test-key",
+        AUDICLABS_TTS_MODEL="audic-tts-1",
+        AUDICLABS_TTS_VOICE="configured-voice",
+    )
+    @patch("complaints.tts.requests.post")
+    def test_rejects_non_mp3_success_body(self, post):
+        post.return_value = Mock(
+            ok=True,
+            status_code=200,
+            content=b'{"error":"not audio"}',
+            headers={"X-Request-Id": "tts-json-response"},
+        )
+
+        with self.assertRaisesRegex(TTSError, "invalid audio"):
+            synthesize_reply("Hello", "hi")
+
+    @override_settings(
+        AUDICLABS_API_KEY="unit-test-key",
+        AUDICLABS_TTS_MODEL="audic-tts-1",
+        AUDICLABS_TTS_VOICE="",
+    )
+    @patch("complaints.tts.requests.post")
+    def test_missing_voice_configuration_does_not_call_provider(self, post):
+        with self.assertRaisesRegex(TTSError, "voice is not configured"):
+            synthesize_reply("Hello", "hi")
+
+        post.assert_not_called()
 
 
 class GoogleTranslationAdapterTests(TestCase):
@@ -77,6 +194,32 @@ class GoogleTranslationAdapterTests(TestCase):
                 self.assertEqual(request["target_language_code"], "en")
 
         self.assertEqual(client.translate_text.call_count, 2)
+
+    @patch("complaints.google_translation.translate_v3.TranslationServiceClient")
+    def test_translates_english_agent_reply_to_customer_language(
+        self,
+        client_class,
+    ):
+        client = client_class.return_value
+        client.translate_text.return_value = SimpleNamespace(
+            translations=[
+                SimpleNamespace(translated_text="नमस्ते")
+            ]
+        )
+
+        translated = google_translate_from_english("Hello", "hi")
+
+        self.assertEqual(translated, "नमस्ते")
+        client.translate_text.assert_called_once_with(
+            request={
+                "parent": "projects/test-project/locations/global",
+                "contents": ["Hello"],
+                "mime_type": "text/plain",
+                "source_language_code": "en",
+                "target_language_code": "hi",
+            },
+            timeout=15,
+        )
 
     @patch("complaints.google_translation.translate_v3.TranslationServiceClient")
     def test_preserves_unicode_translation_response(self, client_class):
@@ -774,6 +917,7 @@ class ComplaintLookupTests(TestCase):
                 "classification_status",
                 "possible_duplicate",
                 "possible_duplicate_ticket_number",
+                "agent_replies",
                 "created_at",
                 "updated_at",
             },
@@ -797,8 +941,163 @@ class ComplaintLookupTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
 
+class AgentAuthenticationTests(TestCase):
+    def setUp(self):
+        self.user_model = get_user_model()
+        self.agent = self.user_model.objects.create_user(
+            username="agent",
+            password="test-password",
+            is_staff=True,
+        )
+        self.complaint = Complaint.objects.create(
+            customer_phone="1234567890",
+            original_transcript="Customer complaint",
+        )
+
+    def test_agent_can_log_in_check_session_and_log_out(self):
+        login_response = self.client.post(
+            "/api/auth/login/",
+            data=json.dumps(
+                {"username": "agent", "password": "test-password"}
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(login_response.status_code, 200)
+        self.assertTrue(login_response.json()["authenticated"])
+        self.assertEqual(login_response.json()["user"]["username"], "agent")
+
+        session_response = self.client.get("/api/auth/session/")
+        self.assertEqual(session_response.status_code, 200)
+        self.assertTrue(session_response.json()["authenticated"])
+        self.assertTrue(session_response.json()["user"]["is_staff"])
+
+        logout_response = self.client.post("/api/auth/logout/")
+        self.assertEqual(logout_response.status_code, 200)
+        self.assertFalse(logout_response.json()["authenticated"])
+        self.assertEqual(
+            self.client.get("/api/auth/session/").json()["authenticated"],
+            False,
+        )
+
+    def test_login_rejects_invalid_credentials_and_non_staff_accounts(self):
+        invalid_response = self.client.post(
+            "/api/auth/login/",
+            data=json.dumps(
+                {"username": "agent", "password": "incorrect"}
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(invalid_response.status_code, 401)
+
+        self.user_model.objects.create_user(
+            username="customer-user",
+            password="test-password",
+        )
+        non_staff_response = self.client.post(
+            "/api/auth/login/",
+            data=json.dumps(
+                {"username": "customer-user", "password": "test-password"}
+            ),
+            content_type="application/json",
+        )
+        self.assertEqual(non_staff_response.status_code, 401)
+        self.assertFalse(
+            self.client.get("/api/auth/session/").json()["authenticated"]
+        )
+
+    def test_agent_endpoints_reject_anonymous_requests(self):
+        responses = [
+            self.client.get("/api/complaints/"),
+            self.client.post(
+                f"/api/complaints/{self.complaint.ticket_number}/status/",
+                {"status": Complaint.Status.IN_PROGRESS},
+            ),
+            self.client.post(
+                f"/api/complaints/{self.complaint.ticket_number}/replies/",
+                data=json.dumps({"english_text": "We will help."}),
+                content_type="application/json",
+            ),
+        ]
+
+        self.assertEqual([response.status_code for response in responses], [401] * 3)
+
+    def test_authenticated_non_staff_user_is_forbidden(self):
+        customer_user = self.user_model.objects.create_user(
+            username="customer-user",
+            password="test-password",
+        )
+        self.client.force_login(customer_user)
+
+        response = self.client.get("/api/complaints/")
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_customer_ticket_lookup_and_submission_remain_public(self):
+        lookup_response = self.client.get(
+            f"/api/complaints/{self.complaint.ticket_number}/"
+        )
+        submission_response = self.client.post(
+            "/api/complaints/",
+            {"customer_phone": "invalid"},
+        )
+
+        self.assertEqual(lookup_response.status_code, 200)
+        self.assertEqual(submission_response.status_code, 400)
+        self.assertIn("10-digit", submission_response.json()["error"])
+
+    def test_login_and_agent_mutations_require_csrf_tokens(self):
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.get("/api/auth/session/")
+        agent_login_response = csrf_client.post(
+            "/api/auth/login/",
+            data=json.dumps(
+                {"username": "agent", "password": "test-password"}
+            ),
+            content_type="application/json",
+            HTTP_ORIGIN="http://localhost:5173",
+        )
+        self.assertEqual(agent_login_response.status_code, 403)
+
+        csrf_client.force_login(self.agent)
+        status_response = csrf_client.post(
+            f"/api/complaints/{self.complaint.ticket_number}/status/",
+            {"status": Complaint.Status.IN_PROGRESS},
+            HTTP_ORIGIN="http://localhost:5173",
+        )
+        self.assertEqual(status_response.status_code, 403)
+
+        secure_client = Client(enforce_csrf_checks=True)
+        secure_client.get("/api/auth/session/")
+        csrf_token = secure_client.cookies["csrftoken"].value
+        login_response = secure_client.post(
+            "/api/auth/login/",
+            data=json.dumps(
+                {"username": "agent", "password": "test-password"}
+            ),
+            content_type="application/json",
+            HTTP_ORIGIN="http://localhost:5173",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(login_response.status_code, 200)
+
+        status_response = secure_client.post(
+            f"/api/complaints/{self.complaint.ticket_number}/status/",
+            {"status": Complaint.Status.IN_PROGRESS},
+            HTTP_ORIGIN="http://localhost:5173",
+            HTTP_X_CSRFTOKEN=secure_client.cookies["csrftoken"].value,
+        )
+        self.assertEqual(status_response.status_code, 200)
+
+
 class AgentQueueTests(TestCase):
     def setUp(self):
+        agent = get_user_model().objects.create_user(
+            username="queue-agent",
+            password="test-password",
+            is_staff=True,
+        )
+        self.client.force_login(agent)
         self.older_complaint = Complaint.objects.create(
             customer_phone="1111111111",
             language="hi",
@@ -844,6 +1143,7 @@ class AgentQueueTests(TestCase):
             "classification_status",
             "possible_duplicate",
             "possible_duplicate_ticket_number",
+            "agent_replies",
             "created_at",
             "updated_at",
         }
@@ -904,6 +1204,198 @@ class AgentQueueTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+
+class AgentReplyWorkflowTests(TestCase):
+    def setUp(self):
+        agent = get_user_model().objects.create_user(
+            username="reply-agent",
+            password="test-password",
+            is_staff=True,
+        )
+        self.client.force_login(agent)
+        self.media_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media_directory.cleanup)
+        self.settings_override = override_settings(
+            MEDIA_ROOT=self.media_directory.name,
+        )
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+        self.complaint = Complaint.objects.create(
+            customer_phone="1234567890",
+            language="hi",
+        )
+        self.url = (
+            f"/api/complaints/{self.complaint.ticket_number}/replies/"
+        )
+
+    def _post_reply(self, english_text="Your phone repair is complete."):
+        return self.client.post(
+            self.url,
+            data=json.dumps({"english_text": english_text}),
+            content_type="application/json",
+        )
+
+    @patch("complaints.views.synthesize_reply", return_value=b"ID3mock mp3")
+    @patch(
+        "complaints.views.translate_from_english",
+        return_value="आपके फोन की मरम्मत पूरी हो गई है।",
+    )
+    def test_successful_reply_is_translated_synthesized_and_saved(
+        self,
+        translate,
+        synthesize,
+    ):
+        response = self._post_reply()
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertEqual(
+            payload["message"],
+            "Reply saved, translated, and audio generated.",
+        )
+        reply = AgentReply.objects.get()
+        self.assertEqual(reply.english_text, "Your phone repair is complete.")
+        self.assertEqual(reply.translated_text, "आपके फोन की मरम्मत पूरी हो गई है।")
+        self.assertEqual(reply.customer_language, "hi")
+        self.assertEqual(
+            reply.translation_status,
+            AgentReply.TranslationStatus.COMPLETED,
+        )
+        self.assertEqual(
+            reply.audio_status,
+            AgentReply.AudioStatus.COMPLETED,
+        )
+        with reply.audio.open("rb") as saved_audio:
+            self.assertEqual(saved_audio.read(), b"ID3mock mp3")
+        self.assertEqual(payload["reply"]["audio_url"], response.wsgi_request.build_absolute_uri(reply.audio.url))
+        translate.assert_called_once_with(
+            "Your phone repair is complete.",
+            "hi",
+        )
+        synthesize.assert_called_once_with(
+            "आपके फोन की मरम्मत पूरी हो गई है।",
+            "hi",
+        )
+
+    def test_missing_or_invalid_text_is_rejected_without_creating_reply(self):
+        for body in ({}, {"english_text": "  "}, {"english_text": 42}):
+            with self.subTest(body=body):
+                response = self.client.post(
+                    self.url,
+                    data=json.dumps(body),
+                    content_type="application/json",
+                )
+
+                self.assertEqual(response.status_code, 400)
+
+        self.assertFalse(AgentReply.objects.exists())
+
+    def test_malformed_json_is_rejected(self):
+        response = self.client.post(
+            self.url,
+            data="{",
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AgentReply.objects.exists())
+
+    @patch("complaints.views.translate_from_english")
+    @patch("complaints.views.synthesize_reply")
+    def test_nonexistent_ticket_does_not_call_providers(
+        self,
+        synthesize,
+        translate,
+    ):
+        response = self.client.post(
+            "/api/complaints/00000000-0000-0000-0000-000000000000/replies/",
+            data=json.dumps({"english_text": "A response"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        translate.assert_not_called()
+        synthesize.assert_not_called()
+
+    @patch("complaints.views.translate_from_english")
+    @patch("complaints.views.synthesize_reply")
+    def test_translation_failure_preserves_english_reply(
+        self,
+        synthesize,
+        translate,
+    ):
+        translate.side_effect = TranslationError("private provider details")
+
+        response = self._post_reply()
+
+        self.assertEqual(response.status_code, 201)
+        reply = AgentReply.objects.get()
+        self.assertEqual(reply.english_text, "Your phone repair is complete.")
+        self.assertEqual(reply.translated_text, "")
+        self.assertEqual(
+            reply.translation_status,
+            AgentReply.TranslationStatus.FAILED,
+        )
+        self.assertEqual(
+            reply.audio_status,
+            AgentReply.AudioStatus.NOT_ATTEMPTED,
+        )
+        self.assertIn("translation failed", response.json()["message"])
+        self.assertNotIn("private provider details", response.content.decode())
+        synthesize.assert_not_called()
+
+    @patch("complaints.views.translate_from_english", return_value="आपका फोन तैयार है।")
+    @patch("complaints.views.synthesize_reply")
+    def test_tts_failure_preserves_english_and_translated_text(
+        self,
+        synthesize,
+        translate,
+    ):
+        synthesize.side_effect = TTSError("safe provider failure")
+
+        response = self._post_reply()
+
+        self.assertEqual(response.status_code, 201)
+        reply = AgentReply.objects.get()
+        self.assertEqual(reply.english_text, "Your phone repair is complete.")
+        self.assertEqual(reply.translated_text, "आपका फोन तैयार है।")
+        self.assertEqual(
+            reply.audio_status,
+            AgentReply.AudioStatus.FAILED,
+        )
+        self.assertFalse(reply.audio)
+        self.assertIn("audio generation failed", response.json()["message"])
+        translate.assert_called_once()
+        synthesize.assert_called_once()
+
+    @patch("complaints.views.synthesize_reply", return_value=b"ID3mock mp3")
+    @patch(
+        "complaints.views.translate_from_english",
+        return_value="आपका फोन तैयार है।",
+    )
+    def test_saved_replies_are_exposed_by_ticket_and_queue_apis(
+        self,
+        translate,
+        synthesize,
+    ):
+        create_response = self._post_reply()
+        self.assertEqual(create_response.status_code, 201)
+
+        lookup_response = self.client.get(
+            f"/api/complaints/{self.complaint.ticket_number}/"
+        )
+        self.assertEqual(len(lookup_response.json()["agent_replies"]), 1)
+        self.assertEqual(
+            lookup_response.json()["agent_replies"][0]["translated_text"],
+            "आपका फोन तैयार है।",
+        )
+
+        queue_response = self.client.get("/api/complaints/")
+        self.assertEqual(
+            len(queue_response.json()["complaints"][0]["agent_replies"]),
+            1,
+        )
 
 
 class ComplaintProcessingTests(TestCase):

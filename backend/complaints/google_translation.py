@@ -23,19 +23,14 @@ SOURCE_LANGUAGE_CODES = {
 TRANSLATION_TIMEOUT_SECONDS = 15
 
 
-def translate_to_english(text, source_language):
-    source_language_code = SOURCE_LANGUAGE_CODES.get(source_language)
-    if source_language_code is None:
-        raise TranslationError(
-            "The selected language is not supported for translation."
-        )
-
+def _validate_text(text):
     if not isinstance(text, str) or not text.strip():
         raise TranslationError("There is no transcript to translate.")
 
-    if source_language_code == "en":
-        return text.strip()
+    return text.strip()
 
+
+def _translate(text, source_language_code, target_language_code):
     project_id = settings.GOOGLE_CLOUD_PROJECT.strip()
     if not project_id:
         raise TranslationUnavailable(
@@ -59,7 +54,7 @@ def translate_to_english(text, source_language):
                 "contents": [text],
                 "mime_type": "text/plain",
                 "source_language_code": source_language_code,
-                "target_language_code": "en",
+                "target_language_code": target_language_code,
             },
             timeout=TRANSLATION_TIMEOUT_SECONDS,
         )
@@ -107,3 +102,31 @@ def translate_to_english(text, source_language):
         )
 
     return translated_text.strip()
+
+
+def translate_to_english(text, source_language):
+    source_language_code = SOURCE_LANGUAGE_CODES.get(source_language)
+    if source_language_code is None:
+        raise TranslationError(
+            "The selected language is not supported for translation."
+        )
+
+    clean_text = _validate_text(text)
+    if source_language_code == "en":
+        return clean_text
+
+    return _translate(clean_text, source_language_code, "en")
+
+
+def translate_from_english(text, target_language):
+    target_language_code = SOURCE_LANGUAGE_CODES.get(target_language)
+    if target_language_code is None:
+        raise TranslationError(
+            "The selected language is not supported for translation."
+        )
+
+    clean_text = _validate_text(text)
+    if target_language_code == "en":
+        return clean_text
+
+    return _translate(clean_text, "en", target_language_code)

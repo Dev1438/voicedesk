@@ -17,7 +17,11 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 from complaints.views import (
+    agent_login,
+    agent_logout,
+    auth_session,
     complaints_collection,
+    create_agent_reply,
     get_complaint,
     update_complaint_status,
 )
@@ -26,6 +30,9 @@ from django.conf.urls.static import static
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path("api/auth/session/", auth_session, name="auth_session"),
+    path("api/auth/login/", agent_login, name="agent_login"),
+    path("api/auth/logout/", agent_logout, name="agent_logout"),
     path(
         "api/complaints/",
         complaints_collection,
@@ -35,6 +42,11 @@ urlpatterns = [
         "api/complaints/<uuid:ticket_number>/",
         get_complaint,
         name="get_complaint",
+    ),
+    path(
+        "api/complaints/<uuid:ticket_number>/replies/",
+        create_agent_reply,
+        name="create_agent_reply",
     ),
     path(
         "api/complaints/<uuid:ticket_number>/status/",

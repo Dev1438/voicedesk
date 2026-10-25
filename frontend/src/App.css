@@ -72,6 +72,40 @@ button {
   font-size: 14px;
 }
 
+.portal-switcher {
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid #e5eaf2;
+  border-radius: 10px;
+  background: #f5f7fb;
+}
+
+.portal-switcher button {
+  min-height: 36px;
+  padding: 0 13px;
+  border: 0;
+  border-radius: 7px;
+  color: #68758a;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.portal-switcher button:hover {
+  color: #26334a;
+}
+
+.portal-switcher button.is-active {
+  color: #ffffff;
+  background: #345de5;
+}
+
+.portal-switcher button:focus-visible {
+  outline: 3px solid rgb(52 93 229 / 35%);
+  outline-offset: 2px;
+}
+
 .page-content {
   width: min(680px, calc(100% - 32px));
   margin: 0 auto;
@@ -194,6 +228,21 @@ button {
   margin-bottom: 20px;
 }
 
+.agent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.agent-login {
+  max-width: 520px;
+  margin: 0 auto;
+}
+
+.agent-login .field-help {
+  margin: 16px 0 0;
+}
+
 .queue-filter {
   max-width: 260px;
 }
@@ -224,6 +273,63 @@ button {
   font-size: 12px;
   line-height: 1.6;
   overflow-wrap: anywhere;
+}
+
+.agent-reply-history {
+  display: grid;
+  gap: 9px;
+  margin-top: 16px;
+}
+
+.agent-reply-history h4 {
+  margin: 0;
+  color: #29364b;
+  font-size: 13px;
+}
+
+.agent-reply {
+  padding: 12px;
+  border: 1px solid #e5eaf2;
+  border-radius: 9px;
+  background: #ffffff;
+}
+
+.agent-reply p {
+  margin: 0 0 9px;
+}
+
+.agent-reply audio {
+  width: 100%;
+  max-width: 360px;
+}
+
+.agent-reply-form {
+  display: grid;
+  gap: 9px;
+  margin-top: 16px;
+}
+
+.agent-reply-form label {
+  color: #29364b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.agent-reply-form textarea {
+  width: 100%;
+  min-height: 82px;
+  padding: 11px 13px;
+  border: 1px solid #dce3ed;
+  border-radius: 9px;
+  color: #26334a;
+  background: #ffffff;
+  resize: vertical;
+}
+
+.agent-reply-form textarea:focus {
+  border-color: #345de5;
+  outline: none;
+  box-shadow: 0 0 0 3px rgb(52 93 229 / 10%);
 }
 
 .queue-status-control {
@@ -393,9 +499,18 @@ button {
   background: #345de5;
 }
 
+.button-secondary {
+  color: #345de5;
+  background: #edf1ff;
+}
+
 .button-primary:hover,
 .button-submit:hover {
   background: #264ac6;
+}
+
+.button-secondary:hover {
+  background: #e1e8ff;
 }
 
 .button-stop {
@@ -479,6 +594,21 @@ button {
 
   .header-label {
     font-size: 11px;
+  }
+
+  .portal-switcher {
+    gap: 2px;
+    padding: 3px;
+  }
+
+  .portal-switcher button {
+    min-height: 34px;
+    padding: 0 8px;
+    font-size: 10px;
+  }
+
+  .agent-actions {
+    width: 100%;
   }
 
   .page-content {

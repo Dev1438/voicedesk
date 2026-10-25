@@ -41,3 +41,32 @@ def translate_to_english(text, source_language):
         )
 
     return translated_text.strip()
+
+
+def translate_from_english(text, target_language):
+    """Call the configured reply adapter(text, target_language) -> text."""
+    adapter_path = settings.COMPLAINT_REPLY_TRANSLATION_ADAPTER
+    if not adapter_path:
+        raise TranslationUnavailable(
+            "No customer-language translation provider is configured."
+        )
+
+    try:
+        adapter = import_string(adapter_path)
+    except (ImportError, AttributeError, TypeError) as error:
+        raise TranslationError(
+            "The configured reply translation adapter could not be loaded."
+        ) from error
+
+    if not callable(adapter):
+        raise TranslationError(
+            "The configured reply translation adapter is not callable."
+        )
+
+    translated_text = adapter(text, target_language)
+    if not isinstance(translated_text, str) or not translated_text.strip():
+        raise TranslationError(
+            "The reply translation adapter did not return translated text."
+        )
+
+    return translated_text.strip()
