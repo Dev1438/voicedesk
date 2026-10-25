@@ -1,13 +1,16 @@
 import tempfile
+from datetime import timedelta
 from unittest.mock import Mock, patch
 
 import requests
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
+from .duplicate_detection import find_possible_duplicate
 from .models import Complaint
 from .processing import ComplaintSuggestions, suggest_complaint_details
-from .translation import TranslationError
+from .translation import TranslationError, TranslationUnavailable
 from .transcription import TranscriptionError, transcribe_complaint
 
 
@@ -196,6 +199,8 @@ class ComplaintLookupTests(TestCase):
                 "priority",
                 "summary",
                 "classification_status",
+                "possible_duplicate",
+                "possible_duplicate_ticket_number",
                 "created_at",
                 "updated_at",
             },
@@ -263,6 +268,8 @@ class AgentQueueTests(TestCase):
             "summary",
             "processing_status",
             "classification_status",
+            "possible_duplicate",
+            "possible_duplicate_ticket_number",
             "created_at",
             "updated_at",
         }
@@ -488,3 +495,154 @@ class ComplaintProcessingTests(TestCase):
             suggestions.summary,
             "Please look into this when you can.",
         )
+
+
+class DuplicateDetectionTests(TestCase):
+    def setUp(self):
+        self.media_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.media_directory.cleanup)
+        self.settings_override = override_settings(
+            MEDIA_ROOT=self.media_directory.name,
+            COMPLAINT_TRANSLATION_ADAPTER="",
+        )
+        self.settings_override.enable()
+        self.addCleanup(self.settings_override.disable)
+
+    def _create_complaint(
+        self,
+        *,
+        phone="1234567890",
+        transcript="",
+        translation="",
+    ):
+        return Complaint.objects.create(
+            customer_phone=phone,
+            original_transcript=transcript,
+            english_translation=translation,
+        )
+
+    def _age_complaint(self, complaint, days):
+        Complaint.objects.filter(pk=complaint.pk).update(
+            created_at=timezone.now() - timedelta(days=days)
+        )
+        complaint.refresh_from_db()
+
+    def test_same_phone_matching_normalized_text_within_seven_days(self):
+        earlier = self._create_complaint(
+            transcript="Your billing charge is wrong.",
+        )
+        self._age_complaint(earlier, 6)
+        newer = self._create_complaint(
+            translation="  YOUR billing—charge   is wrong! ",
+        )
+
+        duplicate = find_possible_duplicate(newer)
+
+        self.assertEqual(duplicate, earlier)
+        newer.possible_duplicate_of = duplicate
+        newer.save(update_fields=["possible_duplicate_of"])
+        response = self.client.get(
+            f"/api/complaints/{newer.ticket_number}/"
+        )
+        self.assertTrue(response.json()["possible_duplicate"])
+        self.assertEqual(
+            response.json()["possible_duplicate_ticket_number"],
+            str(earlier.ticket_number),
+        )
+
+    def test_same_phone_with_different_text_is_not_duplicate(self):
+        earlier = self._create_complaint(
+            transcript="My delivery has not arrived.",
+        )
+        self._age_complaint(earlier, 1)
+        newer = self._create_complaint(
+            transcript="I cannot log in to my account.",
+        )
+
+        self.assertIsNone(find_possible_duplicate(newer))
+
+    def test_matching_text_from_different_phone_is_not_duplicate(self):
+        earlier = self._create_complaint(
+            phone="1111111111",
+            transcript="My bill is incorrect.",
+        )
+        self._age_complaint(earlier, 1)
+        newer = self._create_complaint(
+            phone="2222222222",
+            transcript="My bill is incorrect!",
+        )
+
+        self.assertIsNone(find_possible_duplicate(newer))
+
+    def test_matching_text_older_than_seven_days_is_not_duplicate(self):
+        earlier = self._create_complaint(
+            transcript="My payment was charged twice.",
+        )
+        self._age_complaint(earlier, 8)
+        newer = self._create_complaint(
+            transcript="My payment was charged twice!",
+        )
+
+        self.assertIsNone(find_possible_duplicate(newer))
+
+    def test_missing_transcript_does_not_create_duplicate(self):
+        earlier = self._create_complaint()
+        newer = self._create_complaint()
+
+        self.assertIsNone(find_possible_duplicate(newer))
+        self.assertIsNone(earlier.possible_duplicate_of)
+        self.assertIsNone(newer.possible_duplicate_of)
+
+    def test_existing_complaint_is_not_matched_to_itself(self):
+        complaint = self._create_complaint(
+            transcript="My payment was charged twice.",
+        )
+
+        self.assertIsNone(find_possible_duplicate(complaint))
+
+    def test_historical_complaints_keep_nullable_duplicate_default(self):
+        historical = self._create_complaint(
+            transcript="Historical complaint text.",
+        )
+
+        self.assertIsNone(historical.possible_duplicate_of)
+        self.assertTrue(
+            Complaint._meta.get_field("possible_duplicate_of").null
+        )
+
+    @patch("complaints.views.translate_to_english")
+    @patch("complaints.views.transcribe_complaint")
+    def test_creation_response_marks_possible_duplicate(
+        self,
+        transcribe,
+        translate,
+    ):
+        earlier = self._create_complaint(
+            transcript="My account login does not work.",
+        )
+        self._age_complaint(earlier, 2)
+        transcribe.return_value = "My account login does not work!"
+        translate.side_effect = TranslationUnavailable(
+            "No provider configured"
+        )
+
+        response = self.client.post(
+            "/api/complaints/",
+            {
+                "customer_phone": "1234567890",
+                "language": "te",
+                "audio": SimpleUploadedFile(
+                    "complaint.webm",
+                    b"mocked audio",
+                    content_type="audio/webm",
+                ),
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.json()["possible_duplicate"])
+        self.assertEqual(
+            response.json()["possible_duplicate_ticket_number"],
+            str(earlier.ticket_number),
+        )
+        transcribe.assert_called_once()

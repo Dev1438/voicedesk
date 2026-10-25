@@ -55,6 +55,14 @@ class Complaint(models.Model):
         choices=ClassificationStatus.choices,
         default=ClassificationStatus.UNREVIEWED,
     )
+    possible_duplicate_of = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        default=None,
+        on_delete=models.SET_NULL,
+        related_name="possible_duplicates",
+    )
     status = models.CharField(
         max_length=20,
         choices=Status.choices,

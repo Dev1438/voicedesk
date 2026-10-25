@@ -144,6 +144,11 @@ button {
   background: #fff0f1;
 }
 
+.possible-duplicate {
+  color: #8b4c13 !important;
+  font-weight: 600;
+}
+
 .agent-queue {
   margin-bottom: 20px;
 }

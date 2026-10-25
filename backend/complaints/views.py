@@ -10,6 +10,7 @@ from django.views.decorators.http import require_http_methods
 from django.views.decorators.http import require_POST
 
 from .models import Complaint
+from .duplicate_detection import find_possible_duplicate
 from .processing import suggest_complaint_details
 from .translation import (
     TranslationError,
@@ -34,6 +35,12 @@ def _complaint_payload(complaint):
         "summary": complaint.summary,
         "processing_status": complaint.processing_status,
         "classification_status": complaint.classification_status,
+        "possible_duplicate": complaint.possible_duplicate_of_id is not None,
+        "possible_duplicate_ticket_number": (
+            str(complaint.possible_duplicate_of.ticket_number)
+            if complaint.possible_duplicate_of_id
+            else None
+        ),
         "created_at": complaint.created_at.isoformat(),
         "updated_at": complaint.updated_at.isoformat(),
     }
@@ -49,7 +56,7 @@ def complaints_collection(request):
 
 @require_GET
 def list_complaints(request):
-    complaints = Complaint.objects.all()
+    complaints = Complaint.objects.select_related("possible_duplicate_of")
     filter_fields = ("status", "category", "priority", "language")
     for field in filter_fields:
         value = request.GET.get(field, "").strip()
@@ -129,6 +136,8 @@ def create_complaint(request):
                 "status": complaint.status,
                 "transcription_status": "failed",
                 "processing_status": complaint.processing_status,
+                "possible_duplicate": False,
+                "possible_duplicate_ticket_number": None,
                 "transcription_error": str(error),
             },
             status=201,
@@ -176,6 +185,10 @@ def create_complaint(request):
             type(error).__name__,
         )
 
+    possible_duplicate = find_possible_duplicate(complaint)
+    if possible_duplicate:
+        complaint.possible_duplicate_of = possible_duplicate
+
     complaint.save(
         update_fields=[
             "original_transcript",
@@ -185,6 +198,7 @@ def create_complaint(request):
             "summary",
             "processing_status",
             "classification_status",
+            "possible_duplicate_of",
             "updated_at",
         ]
     )
@@ -197,6 +211,12 @@ def create_complaint(request):
             "transcription_status": "completed",
             "processing_status": complaint.processing_status,
             "classification_status": complaint.classification_status,
+            "possible_duplicate": complaint.possible_duplicate_of_id is not None,
+            "possible_duplicate_ticket_number": (
+                str(complaint.possible_duplicate_of.ticket_number)
+                if complaint.possible_duplicate_of_id
+                else None
+            ),
             "original_transcript": complaint.original_transcript,
             "english_translation": complaint.english_translation,
             "category": complaint.category,
@@ -222,6 +242,12 @@ def get_complaint(request, ticket_number):
             "priority": complaint.priority,
             "summary": complaint.summary,
             "classification_status": complaint.classification_status,
+            "possible_duplicate": complaint.possible_duplicate_of_id is not None,
+            "possible_duplicate_ticket_number": (
+                str(complaint.possible_duplicate_of.ticket_number)
+                if complaint.possible_duplicate_of_id
+                else None
+            ),
             "created_at": complaint.created_at.isoformat(),
             "updated_at": complaint.updated_at.isoformat(),
         }

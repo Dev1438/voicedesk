@@ -405,6 +405,13 @@ function App() {
                 <strong>Updated:</strong>{" "}
                 {new Date(lookupResult.updated_at).toLocaleString()}
               </p>
+              {lookupResult.possible_duplicate &&
+                lookupResult.possible_duplicate_ticket_number && (
+                  <p className="possible-duplicate">
+                    <strong>Possible duplicate:</strong>{" "}
+                    {lookupResult.possible_duplicate_ticket_number}
+                  </p>
+                )}
             </div>
           )}
         </section>
@@ -472,6 +479,13 @@ function App() {
                   <strong>{queueTicket.ticket_number}</strong>
                   <span className="step-label">{queueTicket.status}</span>
                 </div>
+                {queueTicket.possible_duplicate &&
+                  queueTicket.possible_duplicate_ticket_number && (
+                    <p className="possible-duplicate">
+                      <strong>Possible duplicate of:</strong>{" "}
+                      {queueTicket.possible_duplicate_ticket_number}
+                    </p>
+                  )}
                 <p>
                   <strong>Language:</strong> {queueTicket.language}
                   {" · "}
@@ -681,6 +695,13 @@ function App() {
               <h3>Complaint registered!</h3>
               <p>Ticket number: {ticket.ticket_number}</p>
               <p>Status: {ticket.status}</p>
+              {ticket.possible_duplicate &&
+                ticket.possible_duplicate_ticket_number && (
+                  <p className="possible-duplicate">
+                    <strong>Possible duplicate of:</strong>{" "}
+                    {ticket.possible_duplicate_ticket_number}
+                  </p>
+                )}
               {ticket.processing_status && (
                 <p>
                   Processing: {ticket.processing_status.replaceAll("_", " ")}
