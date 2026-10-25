@@ -116,6 +116,104 @@ button {
   box-shadow: 0 14px 45px rgb(26 43 75 / 5%);
 }
 
+.ticket-lookup {
+  margin-bottom: 20px;
+}
+
+.ticket-lookup .card-heading {
+  margin-bottom: 20px;
+}
+
+.ticket-lookup .button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.lookup-result h3 {
+  margin: 0 0 10px;
+}
+
+.lookup-result p {
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+
+.lookup-error {
+  margin-top: 18px;
+  color: #8f2934;
+  background: #fff0f1;
+}
+
+.agent-queue {
+  margin-bottom: 20px;
+}
+
+.agent-queue .card-heading {
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.queue-filter {
+  max-width: 260px;
+}
+
+.queue-list {
+  display: grid;
+  gap: 14px;
+}
+
+.queue-ticket {
+  padding: 16px;
+  border: 1px solid #e5eaf2;
+  border-radius: 12px;
+  background: #fafbfe;
+}
+
+.queue-ticket-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+
+.queue-ticket p {
+  margin: 10px 0 0;
+  color: #58667c;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.queue-status-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.queue-status-control label {
+  color: #29364b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.queue-status-control select {
+  min-height: 40px;
+  padding: 0 10px;
+  border: 1px solid #dce3ed;
+  border-radius: 8px;
+  color: #26334a;
+  background: white;
+}
+
+.queue-status-control .button:disabled,
+.agent-queue .card-heading .button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .card-heading {
   display: flex;
   align-items: flex-start;

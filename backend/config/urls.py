@@ -16,11 +16,35 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
-from complaints.views import create_complaint
+from complaints.views import (
+    complaints_collection,
+    get_complaint,
+    update_complaint_status,
+)
+from django.conf import settings
+from django.conf.urls.static import static
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path("api/complaints/", create_complaint, name="create_complaint"),
-
-    
+    path(
+        "api/complaints/",
+        complaints_collection,
+        name="create_complaint",
+    ),
+    path(
+        "api/complaints/<uuid:ticket_number>/",
+        get_complaint,
+        name="get_complaint",
+    ),
+    path(
+        "api/complaints/<uuid:ticket_number>/status/",
+        update_complaint_status,
+        name="update_complaint_status",
+    ),
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(
+        settings.MEDIA_URL,
+        document_root=settings.MEDIA_ROOT,
+    )
