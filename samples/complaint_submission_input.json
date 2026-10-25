@@ -1,0 +1,20 @@
+{
+  "method": "POST",
+  "path": "/api/complaints/",
+  "content_type": "multipart/form-data",
+  "fields": {
+    "customer_phone": "5550100199",
+    "language": "hi"
+  },
+  "files": {
+    "audio": {
+      "filename": "synthetic_complaint.wav",
+      "content_type": "audio/wav",
+      "description": "Short silent PCM WAV placeholder; contains no speech."
+    }
+  },
+  "test_fixture_only": {
+    "mocked_transcript": "मेरा फोन ठीक से काम नहीं कर रहा है।",
+    "mocked_english_translation": "My phone is not working properly; the battery is dead."
+  }
+}

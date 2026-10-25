@@ -1,0 +1,28 @@
+{
+  "ticket_number": "[REDACTED-TICKET-UUID]",
+  "status": "submitted",
+  "denoising_status": "completed",
+  "original_transcript": "मेरा फोन ठीक से काम नहीं कर रहा है।",
+  "processing_status": "completed",
+  "english_translation": "My phone is not working properly; the battery is dead.",
+  "category": "technical",
+  "priority": "normal",
+  "summary": "My phone is not working properly; the battery is dead.",
+  "classification_status": "suggested",
+  "possible_duplicate": false,
+  "possible_duplicate_ticket_number": null,
+  "agent_replies": [
+    {
+      "id": 1,
+      "english_text": "We have received your complaint.",
+      "translated_text": "आपकी शिकायत प्राप्त हुई है। हम आपके फोन की समस्या पर काम कर रहे हैं।",
+      "customer_language": "hi",
+      "translation_status": "completed",
+      "audio_status": "failed",
+      "audio_url": null,
+      "created_at": "2026-10-25T23:06:24.348156+00:00"
+    }
+  ],
+  "created_at": "2026-10-25T23:06:24.333244+00:00",
+  "updated_at": "2026-10-25T23:06:24.336291+00:00"
+}

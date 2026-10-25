@@ -1,0 +1,13 @@
+{
+  "message": "Reply saved and translated, but audio generation failed.",
+  "reply": {
+    "id": 1,
+    "english_text": "We have received your complaint.",
+    "translated_text": "आपकी शिकायत प्राप्त हुई है। हम आपके फोन की समस्या पर काम कर रहे हैं।",
+    "customer_language": "hi",
+    "translation_status": "completed",
+    "audio_status": "failed",
+    "audio_url": null,
+    "created_at": "2026-10-25T23:06:24.348156+00:00"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "message": "Complaint transcribed, translated, and suggestions generated.",
+  "ticket_number": "[REDACTED-TICKET-UUID]",
+  "status": "submitted",
+  "transcription_status": "completed",
+  "processing_status": "completed",
+  "denoising_status": "completed",
+  "denoising_error": null,
+  "classification_status": "suggested",
+  "possible_duplicate": false,
+  "possible_duplicate_ticket_number": null,
+  "original_transcript": "मेरा फोन ठीक से काम नहीं कर रहा है।",
+  "english_translation": "My phone is not working properly; the battery is dead.",
+  "category": "technical",
+  "priority": "normal",
+  "summary": "My phone is not working properly; the battery is dead."
+}
